@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 # -*- encoding: utf-8 -*-
 
+"""
+Allows to automatically build and test a C program inside a docker container.
+
+Dependencies:
+ - python3
+ - docker
+ - docker-py (>= 1.3.0)
+ - cppcheck
+ - cunit
+ - gcc
+"""
+
+
 import sys
 import re
 import os
@@ -19,10 +32,10 @@ __version__ = '0.1.0'
 class Report(object):
     def __init__(self):
         self.parts = []
-    
+
     def add_part(self, report_part):
         self.parts.append(report_part)
-    
+
     def __str__(self):
         ret = ""
         for p in self.parts:
@@ -35,7 +48,7 @@ class ReportPart(object):
         self.source = source
         self.returncode = returncode
         self.messages = messages
-    
+
     def __str__(self):
         ret = "{} {}\n".format(self.source, self.returncode)
         for m in self.messages:
@@ -112,7 +125,7 @@ class CompilerGcc(object):
             flags = ["-static", "-std=c99", "-O0", "-g", "-Wall", "-Wextra"]
         self.flags = flags
         self.parser = CompilerGccParser()
-        
+
     def compile(self, project):
         cmd  = ["gcc"]
         cmd += self.flags
@@ -153,7 +166,7 @@ class CppCheckParser(object):
 class CppCheck(object):
     def __init__(self):
         self.parser = CppCheckParser()
-    
+
     def check(self, project):
         cmd  = ["cppcheck"]
         cmd += ["-I{include}".format(include=include) for include in project.include]
@@ -206,10 +219,10 @@ class CunitChecker(object):
         self.parser = CunitParser()
         self.client = docker.Client(version="1.17")
         self.client.info()
-    
+
     def run(self, project):
         img = "autotest/img_" + project.target
-        
+
         dockerfile = """FROM scratch
                         COPY {target} /
                         CMD ["/{target}"]
@@ -222,7 +235,7 @@ class CunitChecker(object):
 
         cont = self.client.create_container(image=img)
         self.client.start(container=cont)
-        
+
         #out = self.client.attach(container=cont, logs=True)
         #print(out.decode('utf-8'))
 
@@ -274,9 +287,9 @@ class Project(object):
     """
 
     cb_unit_template = """<Unit filename="{filename}"><Option compilerVar="CC" /></Unit>"""
-    
+
     cb_unit_h_template = """<Unit filename="{filename}" />"""
-    
+
 
     def __init__(self, target, file_list, libs=None, includes=None):
         if libs is None:
@@ -288,14 +301,18 @@ class Project(object):
         self.libs      = libs
         self.include   = includes
         self.tempdir   = None
-        
+
         # TODO: test if libs are installed?!
         # TODO: check if files exist!
-    
+
     def create_cb_project(self):
         unit_str = ""
         for f in self.file_list:
             unit_str += self.cb_unit_template.format(filename=f)
+        import glob
+        for d in self.include:
+            for f in glob.glob(d + "/*.h"):
+                unit_str += self.cb_unit_h_template.format(filename=f)
         # TODO: implement pretty much everything...
         with open("temp.cbp", "w") as fd:
             fd.write(self.cb_project_template.format(title=self.target, units=unit_str))
@@ -304,8 +321,8 @@ class Project(object):
 class Excercise(object):
     def __init__(self):
         pass
-        
-        
+
+
 class Solution(object):
     def __init__(self):
         pass
@@ -344,11 +361,15 @@ class ConCoCt(object):
             raise FileNotFoundError("ld not found!")
         if proc != 0:
             raise FileNotFoundError("cunit not found!")
+        # docker-py
+        version_info = tuple([int(d) for d in docker.version.split("-")[0].split(".")])
+        if version_info[0] < 1 or version_info[0] == 1 and version_info[1] < 3:
+            raise FileNotFoundError("docker-py version to old!")
 
     def check_project(self, project):
         # TODO: maybe move temp dir to solution class
         project.tempdir = self.tempdir.name
-        
+
         r = Report()
         _r = CppCheck().check(project)
         r.add_part(_r)
@@ -357,7 +378,7 @@ class ConCoCt(object):
         # TODO: run cunit only, if compile successful
         _r = CunitChecker().run(project)
         r.add_part(_r)
-        
+
         project.tempdir = None
         return r
 
@@ -366,7 +387,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Simple gcc wrapper.')
     parser.add_argument('--version', action='version', version='%(prog)s ' + __version__)
     cmd_options = parser.parse_args()
-    
+
 
 if __name__ == '__main__':
     parse_args()
@@ -376,7 +397,7 @@ if __name__ == '__main__':
     except FileNotFoundError as e:
         sys.exit(e)
 
-    p = Project("task1", ["task1/main.c", "task1/group1/lib.c"], libs=["m"], includes=["tmp"])
+    p = Project("task1", ["task1/main.c", "task1/group1/lib.c"], libs=["m"], includes=["task1"])
     p.create_cb_project()
     r = w.check_project(p)
     print(r)
@@ -394,34 +415,3 @@ if __name__ == '__main__':
 #    "description": "description.md",
 #    "libs":        "
 #}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
