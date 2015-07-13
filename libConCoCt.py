@@ -4,6 +4,11 @@
 """
 Allows to automatically build and test a C program inside a docker container.
 
+To run this script you have to have either root privledges or be in the group
+"docker". Use the following command to add your user to that group:
+
+    $ sudo usermod -aG docker [your user]
+
 Dependencies:
  - python3
  - docker
@@ -42,6 +47,45 @@ class Report(object):
             ret += str(p)
         return ret
 
+    def to_json(self):
+        """
+        Converts data from this report to JSON format. First all data from
+        report parts and their messages are collected as dictionary. Then the
+        whole dictionary can be dumped to JSON and be returned.
+
+        TODO Check alternatives like using jsonpickle. Also it would be possible
+        to implement a Encoder class for the standard JSON module.
+        (See https://docs.python.org/2/library/json.html#json.JSONEncoder)
+        """
+        import json
+        json_object = {}
+        for part in self.parts:
+            json_object[part.source] = part.to_json()
+        return json.dumps(json_object)
+
+    def to_xml(self):
+        """
+        Builds a XML representation of all report parts in this report and all
+        messages inside these parts.
+
+        :returns: string containing XML representation of this report
+        """
+        # TODO Check if some serialization library like pyxser would be better.
+        report_root = xml.etree.ElementTree.Element('report')
+        for part in self.parts:
+            current_part = xml.etree.ElementTree.SubElement(report_root, part.source,
+                                                            attrib={'returncode': str(part.returncode)})
+            # create sub-element for each message in report part
+            for message in part.messages:
+                message_element = xml.etree.ElementTree.SubElement(current_part, 'message')
+                # get all information from message object (all fields that are not inherited by object class)
+                message_infos = filter( lambda x: x not in object.__dict__ , message.__dict__.keys() )
+                # append all messages as sub-elements
+                for info in message_infos:
+                    new_sub_element = xml.etree.ElementTree.SubElement(message_element, info)
+                    new_sub_element.text = message.__getattribute__(info)
+        return xml.etree.ElementTree.tostring(report_root)
+
 
 class ReportPart(object):
     def __init__(self, source, returncode, messages):
@@ -54,6 +98,22 @@ class ReportPart(object):
         for m in self.messages:
             ret += "  " + str(m) + "\n"
         return ret
+
+    def to_json(self):
+        """
+        Returns a dictionary with all messages as sub-dictionaries to be
+        dumped into JSON by to_json() method ot Report class.
+        """
+        json_object = {}
+        json_object['returncode'] = self.returncode
+        messages_object = {}
+        for message in self.messages:
+            # get all information from message object (all fields that are not inherited by object class)
+            message_infos = filter( lambda x: x not in object.__dict__ , message.__dict__.keys() )
+            for info in message_infos:
+                messages_object[info] = message.__getattribute__(info)
+        json_object['messages'] = messages_object #self.__dict__ #
+        return json_object
 
 
 class Message(object):
@@ -349,7 +409,7 @@ class ConCoCt(object):
             raise FileNotFoundError("cppcheck not found!")
         # docker
         try:
-            proc = subprocess.call(["docker", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.call(["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
             raise FileNotFoundError("docker not found!")
         if proc != 0:
@@ -401,6 +461,8 @@ if __name__ == '__main__':
     p.create_cb_project()
     r = w.check_project(p)
     print(r)
+    print(r.to_json())
+    print(r.to_xml())
 
 #
 # task          -> Eine Aufgabe
