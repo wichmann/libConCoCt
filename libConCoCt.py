@@ -60,7 +60,7 @@ class Report(object):
         import json
         json_object = {}
         for part in self.parts:
-            json_object[part.source] = part.to_json()
+            json_object[part.source] = part.__to_json__()
         return json.dumps(json_object)
 
     def to_xml(self):
@@ -99,10 +99,11 @@ class ReportPart(object):
             ret += "  " + str(m) + "\n"
         return ret
 
-    def to_json(self):
+    def __to_json__(self):
         """
-        Returns a dictionary with all messages as sub-dictionaries to be
-        dumped into JSON by to_json() method ot Report class.
+        Returns a dictionary with all messages as sub-dictionaries to be dumped
+        into JSON by to_json() method ot Report class. This method does NOT
+        return a valid JSON object.
         """
         json_object = {}
         json_object['returncode'] = self.returncode
@@ -329,27 +330,34 @@ class Project(object):
 		        <Option compiler="gcc" />
 		        <Build>
 			        <Target title="Debug">
-				        <Option output="{title}" prefix_auto="1" extension_auto="1" />
+				        <Option output="Build/{title}_exec" prefix_auto="1" extension_auto="1" />
+                        <Option working_dir="" />
+				        <Option object_output="Build/" />
 				        <Option type="1" />
 				        <Option compiler="gcc" />
 				        <Compiler>
 					        <Add option="-g" />
+                            <Add option="-std=c99" />
+                            {include_dirs}
 				        </Compiler>
+                        <Linker>
+					        <Add library="cunit" />
+				        </Linker>
 			        </Target>
 		        </Build>
 		        <Compiler>
 			        <Add option="-Wall" />
 		        </Compiler>
+                <Linker>
+					<Add option="-s" />
+				</Linker>
 		        {units}
 	        </Project>
         </CodeBlocks_project_file>
         <!--Watermark user="dummy" TODO: sadly, codeblocks removes this... -->
     """
-
     cb_unit_template = """<Unit filename="{filename}"><Option compilerVar="CC" /></Unit>"""
-
     cb_unit_h_template = """<Unit filename="{filename}" />"""
-
 
     def __init__(self, target, file_list, libs=None, includes=None):
         if libs is None:
@@ -366,16 +374,30 @@ class Project(object):
         # TODO: check if files exist!
 
     def create_cb_project(self):
+        """
+        Create a CodeBlocks project file for this project. The XML file contains
+        links to all source and header files and sets all necessary compiler
+        options. Furthermore all include directories are added as search
+        directories for the compiler.
+
+        :returns: name of new CodeBlocks project file, if no error occured
+        """
+        file_name = "temp.cbp"
         unit_str = ""
+        include_dirs = ""
         for f in self.file_list:
             unit_str += self.cb_unit_template.format(filename=f)
         import glob
         for d in self.include:
+            # set path to include files for compiler
+            include_dirs += """<Add directory="{dir}" />""".format(dir=d)
+            # add all header in include directories in project
             for f in glob.glob(d + "/*.h"):
                 unit_str += self.cb_unit_h_template.format(filename=f)
-        # TODO: implement pretty much everything...
-        with open("temp.cbp", "w") as fd:
-            fd.write(self.cb_project_template.format(title=self.target, units=unit_str))
+        with open(file_name, "w") as fd:
+            fd.write(self.cb_project_template.format(title=self.target, units=unit_str,
+                                                     include_dirs=include_dirs))
+        return file_name
 
 
 class Excercise(object):
