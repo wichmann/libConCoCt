@@ -29,6 +29,8 @@ from io import BytesIO
 import tarfile
 import tempfile
 import docker
+import json
+import glob
 
 
 __version__ = '0.1.0'
@@ -57,7 +59,6 @@ class Report(object):
         to implement a Encoder class for the standard JSON module.
         (See https://docs.python.org/2/library/json.html#json.JSONEncoder)
         """
-        import json
         json_object = {}
         for part in self.parts:
             json_object[part.source] = part.__to_json__()
@@ -73,17 +74,7 @@ class Report(object):
         # TODO Check if some serialization library like pyxser would be better.
         report_root = xml.etree.ElementTree.Element('report')
         for part in self.parts:
-            current_part = xml.etree.ElementTree.SubElement(report_root, part.source,
-                                                            attrib={'returncode': str(part.returncode)})
-            # create sub-element for each message in report part
-            for message in part.messages:
-                message_element = xml.etree.ElementTree.SubElement(current_part, 'message')
-                # get all information from message object (all fields that are not inherited by object class)
-                message_infos = filter( lambda x: x not in object.__dict__ , message.__dict__.keys() )
-                # append all messages as sub-elements
-                for info in message_infos:
-                    new_sub_element = xml.etree.ElementTree.SubElement(message_element, info)
-                    new_sub_element.text = message.__getattribute__(info)
+            report_root.append(part.to_xml())
         return xml.etree.ElementTree.tostring(report_root)
 
 
@@ -110,11 +101,23 @@ class ReportPart(object):
         messages_object = {}
         for message in self.messages:
             # get all information from message object (all fields that are not inherited by object class)
-            message_infos = filter( lambda x: x not in object.__dict__ , message.__dict__.keys() )
+            message_infos = filter(lambda x: x not in object.__dict__ , message.__dict__.keys())
             for info in message_infos:
                 messages_object[info] = message.__getattribute__(info)
         json_object['messages'] = messages_object #self.__dict__ #
         return json_object
+
+    def to_xml(self):
+        """
+        Builds a XML representation of this report part. It returns always the
+        XML Element containing all data of this part.
+        """
+        attributes = {'returncode': str(self.returncode)}
+        current_part = xml.etree.ElementTree.Element(self.source, attrib=attributes)
+        # create sub-element for each message in report part
+        for message in self.messages:
+            current_part.append(message.to_xml())
+        return current_part
 
 
 class Message(object):
@@ -126,6 +129,20 @@ class Message(object):
 
     def __str__(self):
         return "{} {}:{} {}...".format(self.type, self.file, self.line, self.desc[:40])
+
+    def to_xml(self):
+        """
+        Builds a XML representation of this message. It returns always the XML
+        Element containing all data of this message.
+        """
+        message_element = xml.etree.ElementTree.Element('message')
+        # get all information from message object (all fields that are not inherited by object class)
+        message_infos = filter(lambda x: x not in object.__dict__ , self.__dict__.keys())
+        # append all messages as sub-elements
+        for info in message_infos:
+            new_sub_element = xml.etree.ElementTree.SubElement(message_element, info)
+            new_sub_element.text = self.__getattribute__(info)
+        return message_element
 
 
 class CompilerGccParser(object):
@@ -387,7 +404,6 @@ class Project(object):
         include_dirs = ""
         for f in self.file_list:
             unit_str += self.cb_unit_template.format(filename=f)
-        import glob
         for d in self.include:
             # set path to include files for compiler
             include_dirs += """<Add directory="{dir}" />""".format(dir=d)
