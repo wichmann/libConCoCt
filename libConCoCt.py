@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
 # -*- encoding: utf-8 -*-
 
+"""
+Allows to automatically build and test a C program inside a docker container.
+
+To run this script you have to have either root privledges or be in the group
+"docker". Use the following command to add your user to that group:
+
+    $ sudo usermod -aG docker [your user]
+
+Dependencies:
+ - python3
+ - docker
+ - docker-py (>= 1.3.0)
+ - cppcheck
+ - cunit
+ - gcc
+"""
+
+
 import sys
 import re
 import os
@@ -11,23 +29,81 @@ from io import BytesIO
 import tarfile
 import tempfile
 import docker
+import json
+import glob
 
 
 __version__ = '0.1.0'
 
 
+class ReportJSONEncoder(json.JSONEncoder):
+    """
+    Converts reports, report parts and messages into JSON strings. The default
+    method returns a serializable object for all three classes containing report
+    data. Every time either a report, a part of a report or a message has to be
+    serialized to JSON, this encoder can be used:
+
+    >>> json.dumps(some_report, default=ReportJSONEncoder)
+    {"gcc": {"messages": [{"type": "", "line": "", "desc": "", "file": ""}, ...], "returncode": 0}, ...}
+    """
+    # TODO Write JSONDecoder.
+    def default(self, obj):
+        if isinstance(obj, Report):
+            report_object = {}
+            for report in obj.parts:
+                report_object[report.source] = ReportJSONEncoder().default(report)
+            return report_object
+        elif isinstance(obj, ReportPart):
+            report_part_object = {}
+            report_part_object['returncode'] = obj.returncode
+            report_part_object['messages'] = [ReportJSONEncoder().default(m) for m in obj.messages]
+            return report_part_object
+        elif isinstance(obj, Message):
+            message_part_object = {}
+            # get all information from message object (all fields that are not inherited by object class)
+            message_infos = filter(lambda x: x not in object.__dict__ , obj.__dict__.keys())
+            for info in message_infos:
+                message_part_object[info] = obj.__getattribute__(info)
+            return message_part_object
+        else:
+            return JSONEncoder.default(self, obj)
+
+
 class Report(object):
     def __init__(self):
         self.parts = []
-    
+
     def add_part(self, report_part):
         self.parts.append(report_part)
-    
+
     def __str__(self):
         ret = ""
         for p in self.parts:
             ret += str(p)
         return ret
+
+    def to_json(self):
+        """
+        Converts data from this report to JSON format. First all data from
+        report parts and their messages are collected as dictionary. Then the
+        whole dictionary can be dumped to JSON and be returned.
+
+        :returns: string containing a JSON representation of this report
+        """
+        return json.dumps(self, cls=ReportJSONEncoder)
+
+    def to_xml(self):
+        """
+        Builds a XML representation of all report parts in this report and all
+        messages inside these parts.
+
+        :returns: string containing XML representation of this report
+        """
+        # TODO Check if some serialization library like pyxser would be better.
+        report_root = xml.etree.ElementTree.Element('report')
+        for part in self.parts:
+            report_root.append(part.to_xml())
+        return xml.etree.ElementTree.tostring(report_root)
 
 
 class ReportPart(object):
@@ -35,12 +111,33 @@ class ReportPart(object):
         self.source = source
         self.returncode = returncode
         self.messages = messages
-    
+
     def __str__(self):
         ret = "{} {}\n".format(self.source, self.returncode)
         for m in self.messages:
             ret += "  " + str(m) + "\n"
         return ret
+
+    def to_json(self):
+        """
+        Converts data from this report part to JSON format. This includes all
+        messages inside this part and the return code.
+
+        :returns: string containing a JSON representation of this report part
+        """
+        return json.dumps(self, cls=ReportJSONEncoder)
+
+    def to_xml(self):
+        """
+        Builds a XML representation of this report part. It returns always the
+        XML Element containing all data of this part.
+        """
+        attributes = {'returncode': str(self.returncode)}
+        current_part = xml.etree.ElementTree.Element(self.source, attrib=attributes)
+        # create sub-element for each message in report part
+        for message in self.messages:
+            current_part.append(message.to_xml())
+        return current_part
 
 
 class Message(object):
@@ -52,6 +149,29 @@ class Message(object):
 
     def __str__(self):
         return "{} {}:{} {}...".format(self.type, self.file, self.line, self.desc[:40])
+
+    def to_json(self):
+        """
+        Converts data from this message to JSON format. This includes at least
+        the type, file name, line number and a description.
+
+        :returns: string containing a JSON representation of this message
+        """
+        return json.dumps(self, cls=ReportJSONEncoder)
+
+    def to_xml(self):
+        """
+        Builds a XML representation of this message. It returns always the XML
+        Element containing all data of this message.
+        """
+        message_element = xml.etree.ElementTree.Element('message')
+        # get all information from message object (all fields that are not inherited by object class)
+        message_infos = filter(lambda x: x not in object.__dict__ , self.__dict__.keys())
+        # append all messages as sub-elements
+        for info in message_infos:
+            new_sub_element = xml.etree.ElementTree.SubElement(message_element, info)
+            new_sub_element.text = self.__getattribute__(info)
+        return message_element
 
 
 class CompilerGccParser(object):
@@ -112,7 +232,7 @@ class CompilerGcc(object):
             flags = ["-static", "-std=c99", "-O0", "-g", "-Wall", "-Wextra"]
         self.flags = flags
         self.parser = CompilerGccParser()
-        
+
     def compile(self, project):
         cmd  = ["gcc"]
         cmd += self.flags
@@ -153,7 +273,7 @@ class CppCheckParser(object):
 class CppCheck(object):
     def __init__(self):
         self.parser = CppCheckParser()
-    
+
     def check(self, project):
         cmd  = ["cppcheck"]
         cmd += ["-I{include}".format(include=include) for include in project.include]
@@ -206,10 +326,10 @@ class CunitChecker(object):
         self.parser = CunitParser()
         self.client = docker.Client(version="1.17")
         self.client.info()
-    
+
     def run(self, project):
         img = "autotest/img_" + project.target
-        
+
         dockerfile = """FROM scratch
                         COPY {target} /
                         CMD ["/{target}"]
@@ -222,7 +342,7 @@ class CunitChecker(object):
 
         cont = self.client.create_container(image=img)
         self.client.start(container=cont)
-        
+
         #out = self.client.attach(container=cont, logs=True)
         #print(out.decode('utf-8'))
 
@@ -256,27 +376,34 @@ class Project(object):
 		        <Option compiler="gcc" />
 		        <Build>
 			        <Target title="Debug">
-				        <Option output="{title}" prefix_auto="1" extension_auto="1" />
+				        <Option output="Build/{title}_exec" prefix_auto="1" extension_auto="1" />
+                        <Option working_dir="" />
+				        <Option object_output="Build/" />
 				        <Option type="1" />
 				        <Option compiler="gcc" />
 				        <Compiler>
 					        <Add option="-g" />
+                            <Add option="-std=c99" />
+                            {include_dirs}
 				        </Compiler>
+                        <Linker>
+					        <Add library="cunit" />
+				        </Linker>
 			        </Target>
 		        </Build>
 		        <Compiler>
 			        <Add option="-Wall" />
 		        </Compiler>
+                <Linker>
+					<Add option="-s" />
+				</Linker>
 		        {units}
 	        </Project>
         </CodeBlocks_project_file>
         <!--Watermark user="dummy" TODO: sadly, codeblocks removes this... -->
     """
-
     cb_unit_template = """<Unit filename="{filename}"><Option compilerVar="CC" /></Unit>"""
-    
     cb_unit_h_template = """<Unit filename="{filename}" />"""
-    
 
     def __init__(self, target, file_list, libs=None, includes=None):
         if libs is None:
@@ -288,24 +415,41 @@ class Project(object):
         self.libs      = libs
         self.include   = includes
         self.tempdir   = None
-        
+
         # TODO: test if libs are installed?!
         # TODO: check if files exist!
-    
+
     def create_cb_project(self):
+        """
+        Create a CodeBlocks project file for this project. The XML file contains
+        links to all source and header files and sets all necessary compiler
+        options. Furthermore all include directories are added as search
+        directories for the compiler.
+
+        :returns: name of new CodeBlocks project file, if no error occured
+        """
+        file_name = "temp.cbp"
         unit_str = ""
+        include_dirs = ""
         for f in self.file_list:
             unit_str += self.cb_unit_template.format(filename=f)
-        # TODO: implement pretty much everything...
-        with open("temp.cbp", "w") as fd:
-            fd.write(self.cb_project_template.format(title=self.target, units=unit_str))
+        for d in self.include:
+            # set path to include files for compiler
+            include_dirs += """<Add directory="{dir}" />""".format(dir=d)
+            # add all header in include directories in project
+            for f in glob.glob(d + "/*.h"):
+                unit_str += self.cb_unit_h_template.format(filename=f)
+        with open(file_name, "w") as fd:
+            fd.write(self.cb_project_template.format(title=self.target, units=unit_str,
+                                                     include_dirs=include_dirs))
+        return file_name
 
 
 class Excercise(object):
     def __init__(self):
         pass
-        
-        
+
+
 class Solution(object):
     def __init__(self):
         pass
@@ -332,7 +476,7 @@ class ConCoCt(object):
             raise FileNotFoundError("cppcheck not found!")
         # docker
         try:
-            proc = subprocess.call(["docker", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.call(["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
             raise FileNotFoundError("docker not found!")
         if proc != 0:
@@ -344,11 +488,15 @@ class ConCoCt(object):
             raise FileNotFoundError("ld not found!")
         if proc != 0:
             raise FileNotFoundError("cunit not found!")
+        # docker-py
+        version_info = tuple([int(d) for d in docker.version.split("-")[0].split(".")])
+        if version_info[0] < 1 or version_info[0] == 1 and version_info[1] < 3:
+            raise FileNotFoundError("docker-py version to old!")
 
     def check_project(self, project):
         # TODO: maybe move temp dir to solution class
         project.tempdir = self.tempdir.name
-        
+
         r = Report()
         _r = CppCheck().check(project)
         r.add_part(_r)
@@ -357,7 +505,7 @@ class ConCoCt(object):
         # TODO: run cunit only, if compile successful
         _r = CunitChecker().run(project)
         r.add_part(_r)
-        
+
         project.tempdir = None
         return r
 
@@ -366,7 +514,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Simple gcc wrapper.')
     parser.add_argument('--version', action='version', version='%(prog)s ' + __version__)
     cmd_options = parser.parse_args()
-    
+
 
 if __name__ == '__main__':
     parse_args()
@@ -376,10 +524,12 @@ if __name__ == '__main__':
     except FileNotFoundError as e:
         sys.exit(e)
 
-    p = Project("task1", ["task1/main.c", "task1/group1/lib.c"], libs=["m"], includes=["tmp"])
+    p = Project("task1", ["task1/main.c", "task1/group1/lib.c"], libs=["m"], includes=["task1"])
     p.create_cb_project()
     r = w.check_project(p)
     print(r)
+    print(r.to_json())
+    print(r.to_xml())
 
 #
 # task          -> Eine Aufgabe
@@ -394,34 +544,3 @@ if __name__ == '__main__':
 #    "description": "description.md",
 #    "libs":        "
 #}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
