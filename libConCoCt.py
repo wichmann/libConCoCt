@@ -36,6 +36,39 @@ import glob
 __version__ = '0.1.0'
 
 
+class ReportJSONEncoder(json.JSONEncoder):
+    """
+    Converts reports, report parts and messages into JSON strings. The default
+    method returns a serializable object for all three classes containing report
+    data. Every time either a report, a part of a report or a message has to be
+    serialized to JSON, this encoder can be used:
+
+    >>> json.dumps(some_report, default=ReportJSONEncoder)
+    {"gcc": {"messages": [{"type": "", "line": "", "desc": "", "file": ""}, ...], "returncode": 0}, ...}
+    """
+    # TODO Write JSONDecoder.
+    def default(self, obj):
+        if isinstance(obj, Report):
+            report_object = {}
+            for report in obj.parts:
+                report_object[report.source] = ReportJSONEncoder().default(report)
+            return report_object
+        elif isinstance(obj, ReportPart):
+            report_part_object = {}
+            report_part_object['returncode'] = obj.returncode
+            report_part_object['messages'] = [ReportJSONEncoder().default(m) for m in obj.messages]
+            return report_part_object
+        elif isinstance(obj, Message):
+            message_part_object = {}
+            # get all information from message object (all fields that are not inherited by object class)
+            message_infos = filter(lambda x: x not in object.__dict__ , obj.__dict__.keys())
+            for info in message_infos:
+                message_part_object[info] = obj.__getattribute__(info)
+            return message_part_object
+        else:
+            return JSONEncoder.default(self, obj)
+
+
 class Report(object):
     def __init__(self):
         self.parts = []
@@ -55,14 +88,9 @@ class Report(object):
         report parts and their messages are collected as dictionary. Then the
         whole dictionary can be dumped to JSON and be returned.
 
-        TODO Check alternatives like using jsonpickle. Also it would be possible
-        to implement a Encoder class for the standard JSON module.
-        (See https://docs.python.org/2/library/json.html#json.JSONEncoder)
+        :returns: string containing a JSON representation of this report
         """
-        json_object = {}
-        for part in self.parts:
-            json_object[part.source] = part.__to_json__()
-        return json.dumps(json_object)
+        return json.dumps(self, cls=ReportJSONEncoder)
 
     def to_xml(self):
         """
@@ -90,22 +118,14 @@ class ReportPart(object):
             ret += "  " + str(m) + "\n"
         return ret
 
-    def __to_json__(self):
+    def to_json(self):
         """
-        Returns a dictionary with all messages as sub-dictionaries to be dumped
-        into JSON by to_json() method ot Report class. This method does NOT
-        return a valid JSON object.
+        Converts data from this report part to JSON format. This includes all
+        messages inside this part and the return code.
+
+        :returns: string containing a JSON representation of this report part
         """
-        json_object = {}
-        json_object['returncode'] = self.returncode
-        messages_object = {}
-        for message in self.messages:
-            # get all information from message object (all fields that are not inherited by object class)
-            message_infos = filter(lambda x: x not in object.__dict__ , message.__dict__.keys())
-            for info in message_infos:
-                messages_object[info] = message.__getattribute__(info)
-        json_object['messages'] = messages_object #self.__dict__ #
-        return json_object
+        return json.dumps(self, cls=ReportJSONEncoder)
 
     def to_xml(self):
         """
@@ -129,6 +149,15 @@ class Message(object):
 
     def __str__(self):
         return "{} {}:{} {}...".format(self.type, self.file, self.line, self.desc[:40])
+
+    def to_json(self):
+        """
+        Converts data from this message to JSON format. This includes at least
+        the type, file name, line number and a description.
+
+        :returns: string containing a JSON representation of this message
+        """
+        return json.dumps(self, cls=ReportJSONEncoder)
 
     def to_xml(self):
         """
