@@ -31,6 +31,7 @@ import tempfile
 import docker
 import json
 import glob
+import base64
 
 
 __version__ = '0.1.0'
@@ -237,7 +238,7 @@ class CompilerGcc(object):
         cmd  = ["gcc"]
         cmd += self.flags
         cmd += ["-fmessage-length=0"]
-        cmd += ["-I{project_include}".format(project_include=project.target)]
+#        cmd += ["-I{project_include}".format(project_include=project.target)]
         cmd += ["-I{include}".format(include=include) for include in project.include]
         cmd += ["-o", os.path.join(project.tempdir, project.target)]
         cmd += project.file_list
@@ -328,18 +329,21 @@ class CunitChecker(object):
         self.client.info()
 
     def run(self, project):
-        img = "autotest/img_" + project.target
+        img = "autotest/" + project.target
 
         dockerfile = """FROM scratch
                         COPY {target} /
                         CMD ["/{target}"]
                      """
 
+        # TODO: this should be possible in-memory
         with open(os.path.join(project.tempdir, "Dockerfile"), "w") as fd:
             fd.write(dockerfile.format(target=project.target))
+
         build_out = self.client.build(path=project.tempdir, tag=img, rm=True, stream=False)
         [_ for _ in build_out]
 
+        # TODO: check if image was created
         cont = self.client.create_container(image=img)
         self.client.start(container=cont)
 
@@ -348,7 +352,13 @@ class CunitChecker(object):
 
         self.client.wait(container=cont)
 
-        temp = self.client.copy(container=cont, resource="/CUnitAutomated-Results.xml")
+        try:
+            temp = self.client.copy(container=cont, resource="/CUnitAutomated-Results.xml")
+        except docker.errors.APIError as e:
+            # TODO: is there a better way to check and handle this?!
+            if 'Could not find the file' in e.explanation.decode('utf-8'):
+                print('Could not extract cunit results. Maybe source does not contain test?!')
+            return ReportPart("cunit", -1, [])
         buffer = BytesIO()
         buffer.write(temp.data)
         buffer.seek(0)
@@ -416,8 +426,16 @@ class Project(object):
         self.include   = includes
         self.tempdir   = None
 
+        # Workaround for Docker not handling spaces well. Also upper case characters are a no go!
+        # https://github.com/docker/docker/issues/2105
+        self.target = base64.b64encode(self.target.encode('utf-8')).decode('utf-8').lower()
+
+        for f in self.file_list:
+            if not os.path.isfile(f):
+                raise FileNotFoundError("Source file {} not found!".format(f))
+
         # TODO: test if libs are installed?!
-        # TODO: check if files exist!
+
 
     def create_cb_project(self):
         """
@@ -445,14 +463,65 @@ class Project(object):
         return file_name
 
 
-class Excercise(object):
-    def __init__(self):
-        pass
+
+class Task(object):
+    """
+        Represents one Task. Contains all Informations, to create 'packs' of 
+        files to check, compile or distribute.
+        
+        :ivar name          Name of the task.
+        :ivar desc          Path to description file.
+        :ivar scr_dir       Base dir for all files.
+        :ivar files         General files included in all other 'filesets'
+        :ivar files_main    Files used for executing.
+        :ivar files_test    Files used for testing.
+        :ivar files_student Files to be added by the student or for the student in a cb project.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        with open(os.path.join(path, "config.json"), "r") as fd:
+            data = json.load(fd)
+        self.name          = data["name"]
+        self.desc          = data["desc"]
+        self.libs          = data["libs"]
+        self.src_dir       = data["src_dir"]
+        self.files         = data["files"]
+        self.files_main    = data["files_main"]
+        self.files_test    = data["files_test"]
+        self.files_student = data["files_student"]
+    
+    def get_main_project(self, solution):
+        file_list = []
+        file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files]
+        file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files_main]
+        # TODO: include files from actual solution
+        file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files_student]
+
+        include_list = []
+        include_list += [os.path.join(self.path, self.src_dir)]
+        # TODO: add task includes
+        return Project(self.name, file_list, self.libs, include_list)
+        
+    def get_test_project(self, solution):
+        file_list = []
+        file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files]
+        file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files_test]
+        # TODO: include files from actual solution
+        file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files_student]
+        
+        include_list = []
+        include_list += [os.path.join(self.path, self.src_dir)]
+        # TODO: add task includes
+        return Project(self.name, file_list, self.libs, include_list)
+        
 
 
-class Solution(object):
-    def __init__(self):
-        pass
+def Solution(object):
+    def __init__(self, task, path):
+        self.task = task
+        self.path = path
+
 
 
 class ConCoCt(object):
@@ -490,11 +559,11 @@ class ConCoCt(object):
             raise FileNotFoundError("cunit not found!")
         # docker-py
         version_info = tuple([int(d) for d in docker.version.split("-")[0].split(".")])
-        if version_info[0] < 1 or version_info[0] == 1 and version_info[1] < 3:
+        if version_info[0] < 1 or version_info[0] == 1 and version_info[1] < 2:
             raise FileNotFoundError("docker-py version to old!")
 
     def check_project(self, project):
-        # TODO: maybe move temp dir to solution class
+        # TODO: move temp dir to project class
         project.tempdir = self.tempdir.name
 
         r = Report()
@@ -524,23 +593,25 @@ if __name__ == '__main__':
     except FileNotFoundError as e:
         sys.exit(e)
 
-    p = Project("task1", ["task1/main.c", "task1/group1/lib.c"], libs=["m"], includes=["task1"])
-    p.create_cb_project()
+    tasks = []
+    for d in os.listdir("tasks"):
+        try:
+            t = Task(os.path.join("tasks", d))
+            if t is not None:
+                tasks.append(t)
+        except FileNotFoundError:
+            pass
+
+    # TODO: use solution instead of None
+    p = tasks[0].get_test_project(None)
     r = w.check_project(p)
     print(r)
-    print(r.to_json())
-    print(r.to_xml())
 
-#
-# task          -> Eine Aufgabe
-#   submission  -> Eine Abgabe
-#
-#
-#
-#
-#
-#{
-#    "name":        "Schaltjahr",
-#    "description": "description.md",
-#    "libs":        "
-#}
+
+    #p = Project("task1", ["task1/main.c", "task1/group1/lib.c"], libs=["m"], includes=["task1"])
+    #p.create_cb_project()
+    #r = w.check_project(p)
+    #print(r)
+
+
+

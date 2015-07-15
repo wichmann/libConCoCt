@@ -1,0 +1,10 @@
+{
+    "name": "Task 2",
+    "desc": "description.md",
+    "libs": [],
+    "src_dir": "src",
+    "files": ["interface.h", "lib.c", "lib.h"],
+    "files_main": ["main.c"],
+    "files_test": ["test.c"],
+    "files_student": ["interface.c"]
+}
