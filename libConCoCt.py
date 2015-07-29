@@ -31,6 +31,7 @@ import tempfile
 import docker
 import json
 import glob
+import hashlib
 import base64
 
 
@@ -330,26 +331,26 @@ class CunitChecker(object):
 
     def run(self, project):
         img = "autotest/" + project.target
-
+        # check whether target file exists (has been compiled correctly)
+        if not os.path.exists(os.path.join(project.tempdir, project.target)):
+            raise FileNotFoundError("Error: Executable file has not been created!")
         dockerfile = """FROM scratch
                         COPY {target} /
                         CMD ["/{target}"]
                      """
-
+        # build Dockerfile and Docker image
         # TODO: this should be possible in-memory
         with open(os.path.join(project.tempdir, "Dockerfile"), "w") as fd:
             fd.write(dockerfile.format(target=project.target))
-
         build_out = self.client.build(path=project.tempdir, tag=img, rm=True, stream=False)
         [_ for _ in build_out]
 
+        # create container and start it (start unit tests, see Dockerfile)
         # TODO: check if image was created
         cont = self.client.create_container(image=img)
         self.client.start(container=cont)
-
         #out = self.client.attach(container=cont, logs=True)
         #print(out.decode('utf-8'))
-
         self.client.wait(container=cont)
 
         try:
@@ -426,9 +427,11 @@ class Project(object):
         self.include   = includes
         self.tempdir   = None
 
-        # Workaround for Docker not handling spaces well. Also upper case characters are a no go!
-        # https://github.com/docker/docker/issues/2105
-        self.target = base64.b64encode(self.target.encode('utf-8')).decode('utf-8').lower()
+        # Workaround for Docker not handling spaces well. Also upper case
+        # characters are a no go! Equal signs (used as padding in Base64) have
+        # to be stripped from the because they are not valid in docker repo
+        # name! (See: https://github.com/docker/docker/issues/2105)
+        self.target = base64.b64encode(self.target.encode("utf-8")).decode("utf-8").lower().replace("=", "")
 
         for f in self.file_list:
             if not os.path.isfile(f):
@@ -466,9 +469,9 @@ class Project(object):
 
 class Task(object):
     """
-        Represents one Task. Contains all Informations, to create 'packs' of 
+        Represents one Task. Contains all Informations, to create 'packs' of
         files to check, compile or distribute.
-        
+
         :ivar name          Name of the task.
         :ivar desc          Path to description file.
         :ivar scr_dir       Base dir for all files.
@@ -490,38 +493,59 @@ class Task(object):
         self.files_main    = data["files_main"]
         self.files_test    = data["files_test"]
         self.files_student = data["files_student"]
-    
+
     def get_main_project(self, solution):
         file_list = []
         file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files]
         file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files_main]
-        # TODO: include files from actual solution
-        file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files_student]
-
+        # add all files of given solution or files that have been defines in config file
+        if solution:
+            file_list += solution.solution_file_list
+        else:
+            file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files_student]
+        # add all include directories
         include_list = []
         include_list += [os.path.join(self.path, self.src_dir)]
         # TODO: add task includes
         return Project(self.name, file_list, self.libs, include_list)
-        
+
     def get_test_project(self, solution):
         file_list = []
         file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files]
         file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files_test]
-        # TODO: include files from actual solution
-        file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files_student]
-        
+        # add all files of given solution or files that have been defines in config file
+        if solution:
+            file_list += solution.solution_file_list
+        else:
+            file_list += [os.path.join(self.path, self.src_dir, f) for f in self.files_student]
+        # add all include directories
         include_list = []
         include_list += [os.path.join(self.path, self.src_dir)]
         # TODO: add task includes
         return Project(self.name, file_list, self.libs, include_list)
-        
 
 
-def Solution(object):
-    def __init__(self, task, path):
+
+class Solution(object):
+    """
+    Provides a data object containing all information about a possible solution
+    for a given task. The source files given as parameter will be compiled with
+    all source files of the task itself.
+    """
+    def __init__(self, task, solution_file_list=None):
         self.task = task
-        self.path = path
+        if solution_file_list:
+            self.solution_file_list = solution_file_list
+        else:
+            self.solution_file_list = []
 
+    def get_solution_from_filesystem(self, username):
+        """
+        Allows the user to automatically collect a solution from filesystem by
+        a given task (see __init__()) and a given user name. Base directory for
+        the search is the current working directory???
+        """
+        pass
 
 
 class ConCoCt(object):
@@ -569,11 +593,16 @@ class ConCoCt(object):
         r = Report()
         _r = CppCheck().check(project)
         r.add_part(_r)
-        _r = CompilerGcc().compile(project)
-        r.add_part(_r)
-        # TODO: run cunit only, if compile successful
-        _r = CunitChecker().run(project)
-        r.add_part(_r)
+        if _r.returncode == 0:
+            _r = CompilerGcc().compile(project)
+            r.add_part(_r)
+        else:
+            print("Error: Could not run compiler because CppCheck returned error code.")
+        if _r.returncode == 0:
+            _r = CunitChecker().run(project)
+            r.add_part(_r)
+        else:
+            print("Error: Could not run unit tests because Compiler returned error code.")
 
         project.tempdir = None
         return r
@@ -602,8 +631,10 @@ if __name__ == '__main__':
         except FileNotFoundError:
             pass
 
-    # TODO: use solution instead of None
-    p = tasks[0].get_test_project(None)
+    # TODO check what happens when no solution is given -> file si compiled but docker does not work!!!
+    s1 = Solution(tasks[0], ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/groesserNull/user1/solution.c', ))
+    s2 = Solution(tasks[0], ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/groesserNull/user2/solution.c', ))
+    p = tasks[0].get_test_project(s1)
     r = w.check_project(p)
     print(r)
 
@@ -612,6 +643,3 @@ if __name__ == '__main__':
     #p.create_cb_project()
     #r = w.check_project(p)
     #print(r)
-
-
-
