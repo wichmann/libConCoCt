@@ -278,6 +278,8 @@ class CppCheck(object):
 
     def check(self, project):
         cmd  = ["cppcheck"]
+        # do not let CppCheck complain when it is to stupid to find systems includes
+        cmd += ["--suppress=missingIncludeSystem"]
         cmd += ["-I{include}".format(include=include) for include in project.include]
         cmd += ["--std=c99", "--enable=all", "--xml-version=2"]
         cmd += project.file_list
@@ -614,32 +616,30 @@ def parse_args():
     cmd_options = parser.parse_args()
 
 
+def find_all_tasks(tasks_path="tasks"):
+    tasks = []
+    for d in os.listdir(tasks_path):
+        try:
+            t = Task(os.path.join(tasks_path, d))
+            if t is not None:
+                tasks.append(t)
+        except FileNotFoundError:
+            pass
+    return tasks
+
+
 if __name__ == '__main__':
     parse_args()
-
     try:
         w = ConCoCt()
     except FileNotFoundError as e:
         sys.exit(e)
 
-    tasks = []
-    for d in os.listdir("tasks"):
-        try:
-            t = Task(os.path.join("tasks", d))
-            if t is not None:
-                tasks.append(t)
-        except FileNotFoundError:
-            pass
-
     # TODO check what happens when no solution is given -> file si compiled but docker does not work!!!
-    s1 = Solution(tasks[0], ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/groesserNull/user1/solution.c', ))
-    s2 = Solution(tasks[0], ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/groesserNull/user2/solution.c', ))
-    p = tasks[0].get_test_project(s1)
+    t = Task(os.path.join("tasks", "greaterZero"))
+    s1 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user1/solution.c', ))
+    s2 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user2/solution.c', ))
+    p = t.get_test_project(s1)
+    #p.create_cb_project()
     r = w.check_project(p)
     print(r)
-
-
-    #p = Project("task1", ["task1/main.c", "task1/group1/lib.c"], libs=["m"], includes=["task1"])
-    #p.create_cb_project()
-    #r = w.check_project(p)
-    #print(r)
