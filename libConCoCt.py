@@ -26,6 +26,7 @@ import argparse
 import subprocess
 import xml.etree.ElementTree
 from io import BytesIO
+from collections import defaultdict
 import tarfile
 import tempfile
 import docker
@@ -291,6 +292,17 @@ class CppCheck(object):
 
 
 class CunitParser(object):
+    """
+    Parses the output of a CUnit test run and returns messages containing the
+    not successfully completed tests. The messages can be appended onto a
+    Report object together with the results from CppCheck and Compiler.
+
+    Furthermore, a dictionary with all tests from all suites that have been run
+    is available as the attribute "list_of_tests".
+    """
+    def __init__(self):
+        self.list_of_tests = defaultdict(dict)
+
     def parse(self, data):
         messages = []
         tree = xml.etree.ElementTree.fromstring(data)
@@ -317,12 +329,27 @@ class CunitParser(object):
                     t_file = t_failure.find('FILE_NAME').text
                     t_line = t_failure.find('LINE_NUMBER').text
                     t_cond = t_failure.find('CONDITION').text
-                    messages.append(Message(_type="error", _file=t_file, line=t_line, desc="{suite} - {test} - Condition: {cond}".format(suite=s_name, test=t_name, cond=t_cond)))
+                    messages.append(Message(_type="error", _file=t_file, line=t_line,
+                                            desc="{suite} - {test} - Condition: {cond}".format(suite=s_name, test=t_name, cond=t_cond)))
+                    self.add_test_result(s_name, t_name, False)
                 elif t_success is not None:
                     t_name = t_success.find('TEST_NAME').text
+                    self.add_test_result(s_name, t_name, True)
                 else:
                     assert(0)
         return messages
+
+    def add_test_result(self, suite_name, test_name, success=False):
+        """
+        Adds a single unit test result to the list of all tests in all suites
+        that have been run. After parsing of the data is complete that list
+        contains all results.
+
+        :param suite_name: name of test suite for which to add result
+        :param test_name: name of unit test for which to add result
+        :param success: whether the unit test in test suite has been successful
+        """
+        self.list_of_tests[suite_name][test_name] = success
 
 
 class CunitChecker(object):
@@ -362,14 +389,10 @@ class CunitChecker(object):
             if 'Could not find the file' in e.explanation.decode('utf-8'):
                 print('Could not extract cunit results. Maybe source does not contain test?!')
             return ReportPart("cunit", -1, [])
-        buffer = BytesIO()
-        buffer.write(temp.data)
-        buffer.seek(0)
-        tar = tarfile.open(fileobj=buffer, mode='r')
-        fd = tar.extractfile('CUnitAutomated-Results.xml')
-        data = fd.read()
-        fd.close()
-        tar.close()
+        buffer = BytesIO(temp.read())
+        with tarfile.open(fileobj=buffer, mode='r') as tar:
+            with tar.extractfile('CUnitAutomated-Results.xml') as fd:
+                data = fd.read()
 
         self.client.stop(container=cont)
         self.client.remove_container(container=cont)
@@ -601,13 +624,23 @@ class ConCoCt(object):
         else:
             print("Error: Could not run compiler because CppCheck returned error code.")
         if _r.returncode == 0:
-            _r = CunitChecker().run(project)
+            checker = CunitChecker()
+            _r = checker.run(project)
+            self.print_unit_test_results(checker.parser.list_of_tests)
             r.add_part(_r)
         else:
             print("Error: Could not run unit tests because Compiler returned error code.")
 
         project.tempdir = None
         return r
+
+    def print_unit_test_results(self, testresults):
+        print("=====")
+        for suite in sorted(testresults):
+            print("Suite: {}".format(suite))
+            for test in sorted(testresults[suite]):
+                print("{:30s} - {}".format(test, 'success' if testresults[suite][test] else 'failure'))
+        print("=====")
 
 
 def parse_args():
@@ -639,7 +672,7 @@ if __name__ == '__main__':
     t = Task(os.path.join("tasks", "greaterZero"))
     s1 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user1/solution.c', ))
     s2 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user2/solution.c', ))
-    p = t.get_test_project(s1)
+    p = t.get_test_project(s2)
     #p.create_cb_project()
     r = w.check_project(p)
     print(r)
