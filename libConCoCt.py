@@ -380,7 +380,11 @@ class CunitChecker(object):
         self.client.start(container=cont)
         #out = self.client.attach(container=cont, logs=True)
         #print(out.decode('utf-8'))
-        self.client.wait(container=cont)
+        ret_val = self.client.wait(container=cont)
+        # catch problem when unit test executable returns with error code
+        if ret_val != 0:
+            print('Error code returned: {}'.format(ret_val))
+            return ReportPart("cunit", ret_val, [])
 
         try:
             temp = self.client.copy(container=cont, resource="/CUnitAutomated-Results.xml")
@@ -635,12 +639,19 @@ class ConCoCt(object):
         return r
 
     def print_unit_test_results(self, testresults):
-        print("=====")
-        for suite in sorted(testresults):
-            print("Suite: {}".format(suite))
-            for test in sorted(testresults[suite]):
-                print("{:30s} - {}".format(test, 'success' if testresults[suite][test] else 'failure'))
-        print("=====")
+        """
+        Prints test results to console if tests have been successfully executed.
+
+        :param testresults: dictionary containing the results for all test
+                            suites and their unit tests
+        """
+        if testresults:
+            print("=====")
+            for suite in sorted(testresults):
+                print("Suite: {}".format(suite))
+                for test in sorted(testresults[suite]):
+                    print("{:30s} - {}".format(test, 'success' if testresults[suite][test] else 'failure'))
+            print("=====")
 
 
 def parse_args():

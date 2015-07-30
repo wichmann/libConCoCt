@@ -59,4 +59,4 @@ def build_and_check_task_with_solution(task_store_path, solution_file_list):
         sys.exit(e)
     p = t.get_test_project(s)
     r = w.check_project(p)
-    return r.to_json()
+    return r#.to_json()
