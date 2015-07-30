@@ -34,6 +34,8 @@ import json
 import glob
 import hashlib
 import base64
+from zipfile import ZipFile
+import tempfile
 
 
 __version__ = '0.1.0'
@@ -422,6 +424,7 @@ class Project(object):
 				        <Option type="1" />
 				        <Option compiler="gcc" />
 				        <Compiler>
+                            <Add option="-Wall" />
 					        <Add option="-g" />
                             <Add option="-std=c99" />
                             {include_dirs}
@@ -442,6 +445,22 @@ class Project(object):
         </CodeBlocks_project_file>
         <!--Watermark user="dummy" TODO: sadly, codeblocks removes this... -->
     """
+    cb_layout_template = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+        <CodeBlocks_layout_file>
+        	<ActiveTarget name="Debug" />
+        	<File name="description.md" open="1" top="1" tabpos="1" split="0" active="1" splitpos="0" zoom_1="0" zoom_2="0">
+        		<Cursor>
+        			<Cursor1 position="0" topLine="0" />
+        		</Cursor>
+        	</File>
+        	<File name="solution.c" open="1" top="0" tabpos="2" split="0" active="1" splitpos="0" zoom_1="0" zoom_2="0">
+        		<Cursor>
+        			<Cursor1 position="0" topLine="0" />
+        		</Cursor>
+        	</File>
+        </CodeBlocks_layout_file>
+    """
     cb_unit_template = """<Unit filename="{filename}"><Option compilerVar="CC" /></Unit>"""
     cb_unit_h_template = """<Unit filename="{filename}" />"""
 
@@ -450,17 +469,17 @@ class Project(object):
             libs = []
         if includes is None:
             includes = []
-        self.target    = target
-        self.file_list = file_list
-        self.libs      = libs
-        self.include   = includes
-        self.tempdir   = None
+        self.project_name = target
+        self.file_list    = file_list
+        self.libs         = libs
+        self.include      = includes
+        self.tempdir      = None
 
         # Workaround for Docker not handling spaces well. Also upper case
         # characters are a no go! Equal signs (used as padding in Base64) have
         # to be stripped from the because they are not valid in docker repo
         # name! (See: https://github.com/docker/docker/issues/2105)
-        self.target = base64.b64encode(self.target.encode("utf-8")).decode("utf-8").lower().replace("=", "")
+        self.target = base64.b64encode(self.project_name.encode("utf-8")).decode("utf-8").lower().replace("=", "")
 
         for f in self.file_list:
             if not os.path.isfile(f):
@@ -469,31 +488,55 @@ class Project(object):
         # TODO: test if libs are installed?!
 
 
-    def create_cb_project(self):
+    def create_cb_project(self, file_name="project.zip"):
         """
-        Create a CodeBlocks project file for this project. The XML file contains
-        links to all source and header files and sets all necessary compiler
-        options. Furthermore all include directories are added as search
-        directories for the compiler.
+        Create a CodeBlocks project inside a ZIP file. A XML project file
+        contains links to all source and header files and sets all necessary
+        compiler options. Furthermore all include directories are added as
+        search directories for the compiler.
 
-        :returns: name of new CodeBlocks project file, if no error occured
+        :param file_name: name for ZIP file containing CodeBlocks project
+        :returns: name of ZIP file containing CodeBlocks project
         """
-        file_name = "temp.cbp"
         unit_str = ""
         include_dirs = ""
-        for f in self.file_list:
-            unit_str += self.cb_unit_template.format(filename=f)
-        for d in self.include:
-            # set path to include files for compiler
-            include_dirs += """<Add directory="{dir}" />""".format(dir=d)
-            # add all header in include directories in project
-            for f in glob.glob(d + "/*.h"):
-                unit_str += self.cb_unit_h_template.format(filename=f)
-        with open(file_name, "w") as fd:
-            fd.write(self.cb_project_template.format(title=self.target, units=unit_str,
-                                                     include_dirs=include_dirs))
+        with ZipFile(file_name, "w") as project_zip:
+            already_packed_files = []
+            # include all code files
+            for f in self.file_list:
+                only_file_name = os.path.basename(f)
+                project_zip.write(f, only_file_name)
+                unit_str += self.cb_unit_template.format(filename=only_file_name)
+                already_packed_files.append(f)
+            # include all header from all include directories
+            for d in self.include:
+                # set path to include files for compiler
+                #include_dirs += """<Add directory="{dir}" />""".format(dir=d)
+                # add all header in include directories in project
+                for f in glob.glob(d + "/*.h"):
+                    if f not in already_packed_files:
+                        only_file_name = os.path.basename(f)
+                        project_zip.write(f, only_file_name)
+                        unit_str += self.cb_unit_h_template.format(filename=only_file_name)
+                        already_packed_files.append(f)
+            # include description file
+            task_directory = os.path.dirname(os.path.dirname(self.file_list[0]))
+            description_file_name = "description.md"
+            description_file = os.path.join(task_directory, description_file_name)
+            unit_str += self.cb_unit_h_template.format(filename=description_file_name)
+            project_zip.write(description_file, description_file_name)
+            # include project file
+            with tempfile.NamedTemporaryFile() as buffer:
+                buffer.write(self.cb_project_template.format(title=self.project_name, units=unit_str,
+                                                             include_dirs=include_dirs).encode("utf-8"))
+                buffer.flush()
+                project_zip.write(buffer.name, "{}.cbp".format(self.project_name))
+            # include layout file
+            with tempfile.NamedTemporaryFile() as buffer:
+                buffer.write(self.cb_layout_template.encode("utf-8"))
+                buffer.flush()
+                project_zip.write(buffer.name, "{}.layout".format(self.project_name))
         return file_name
-
 
 
 class Task(object):
@@ -679,11 +722,15 @@ if __name__ == '__main__':
     except FileNotFoundError as e:
         sys.exit(e)
 
-    # TODO check what happens when no solution is given -> file si compiled but docker does not work!!!
     t = Task(os.path.join("tasks", "greaterZero"))
     s1 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user1/solution.c', ))
     s2 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user2/solution.c', ))
-    p = t.get_test_project(s2)
-    #p.create_cb_project()
-    r = w.check_project(p)
-    print(r)
+
+    # create test project and unit test it
+    #p = t.get_test_project(s2)
+    #r = w.check_project(p)
+    #print(r)
+
+    # create CodeBlocks project
+    p = t.get_main_project(None)
+    p.create_cb_project()
