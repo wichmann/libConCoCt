@@ -62,6 +62,8 @@ class ReportJSONEncoder(json.JSONEncoder):
             report_part_object = {}
             report_part_object['returncode'] = obj.returncode
             report_part_object['messages'] = [ReportJSONEncoder().default(m) for m in obj.messages]
+            if obj.tests:
+                report_part_object['tests'] = obj.tests
             return report_part_object
         elif isinstance(obj, Message):
             message_part_object = {}
@@ -71,7 +73,7 @@ class ReportJSONEncoder(json.JSONEncoder):
                 message_part_object[info] = obj.__getattribute__(info)
             return message_part_object
         else:
-            return JSONEncoder.default(self, obj)
+            return super(ReportJSONEncoder, self).default(obj)
 
 
 class Report(object):
@@ -112,10 +114,11 @@ class Report(object):
 
 
 class ReportPart(object):
-    def __init__(self, source, returncode, messages):
+    def __init__(self, source, returncode, messages, tests=None):
         self.source = source
         self.returncode = returncode
         self.messages = messages
+        self.tests = tests
 
     def __str__(self):
         ret = "{} {}\n".format(self.source, self.returncode)
@@ -142,6 +145,7 @@ class ReportPart(object):
         # create sub-element for each message in report part
         for message in self.messages:
             current_part.append(message.to_xml())
+        # TODO Add test results (self.tests) to XML output!
         return current_part
 
 
@@ -405,7 +409,7 @@ class CunitChecker(object):
         self.client.remove_image(image=img)
 
         messages = self.parser.parse(data)
-        return ReportPart("cunit", 0, messages)
+        return ReportPart("cunit", 0, messages, self.parser.list_of_tests)
 
 
 class Project(object):
