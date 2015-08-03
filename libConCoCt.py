@@ -13,6 +13,7 @@ Dependencies:
  - python3
  - docker
  - docker-py (>= 1.3.0)
+ - paramiko (SSH implementation)
  - cppcheck
  - cunit
  - gcc
@@ -37,6 +38,11 @@ import base64
 from zipfile import ZipFile
 import tempfile
 from requests.exceptions import ReadTimeout
+# imports for VM runner
+from paramiko.client import SSHClient
+from paramiko import AutoAddPolicy
+import posixpath
+import stat
 
 
 __version__ = '0.1.0'
@@ -85,7 +91,7 @@ class Report(object):
         self.parts.append(report_part)
 
     def __str__(self):
-        ret = ""
+        ret = ''
         for p in self.parts:
             ret += str(p)
         return ret
@@ -122,9 +128,9 @@ class ReportPart(object):
         self.tests = tests
 
     def __str__(self):
-        ret = "{} {}\n".format(self.source, self.returncode)
+        ret = '{} {}\n'.format(self.source, self.returncode)
         for m in self.messages:
-            ret += "  " + str(m) + "\n"
+            ret += '  ' + str(m) + '\n'
         return ret
 
     def to_json(self):
@@ -158,7 +164,7 @@ class Message(object):
         self.desc = desc
 
     def __str__(self):
-        return "{} {}:{} {}...".format(self.type, self.file, self.line, self.desc[:40])
+        return '{} {}:{} {}...'.format(self.type, self.file, self.line, self.desc[:40])
 
     def to_json(self):
         """
@@ -185,52 +191,52 @@ class Message(object):
 
 
 class CompilerGccParser(object):
-    gcc_patterns = [{"type": "ignore",  "file": None, "line": None, "desc": None, "pattern": r"""(.*?):(\d+):(\d+:)? .*\(Each undeclared identifier is reported only once.*"""},
-                    {"type": "ignore",  "file": None, "line": None, "desc": None, "pattern": r"""(.*?):(\d+):(\d+:)? .*for each function it appears in.\).*"""},
-                    {"type": "ignore",  "file": None, "line": None, "desc": None, "pattern": r"""(.*?):(\d+):(\d+:)? .*this will be reported only once per input file.*"""},
-                    {"type": "error",   "file": 0,    "line": 1,    "desc": 3,    "pattern": r"""(.*?):(\d+):(\d+:)? [Ee]rror: ([`'"](.*)['"] undeclared .*)"""},
-                    {"type": "error",   "file": 0,    "line": 1,    "desc": 3,    "pattern": r"""(.*?):(\d+):(\d+:)? [Ee]rror: (conflicting types for .*[`'"](.*)['"].*)"""},
-                    {"type": "error",   "file": 0,    "line": 1,    "desc": 3,    "pattern": r"""(.*?):(\d+):(\d+:)? (parse error before.*[`'"](.*)['"].*)"""},
-                    {"type": "warning", "file": 0,    "line": 1,    "desc": 3,    "pattern": r"""(.*?):(\d+):(\d+:)? [Ww]arning: ([`'"](.*)['"] defined but not used.*)"""},
-                    {"type": "warning", "file": 0,    "line": 1,    "desc": 3,    "pattern": r"""(.*?):(\d+):(\d+:)? [Ww]arning: (conflicting types for .*[`'"](.*)['"].*)"""},
-                    {"type": "warning", "file": 0,    "line": 1,    "desc": 4,    "pattern": r"""(.*?):(\d+):(\d+:)? ([Ww]arning:)?\s*(the use of [`'"](.*)['"] is dangerous, better use [`'"](.*)['"].*)"""},
-                    {"type": "info",    "file": 0,    "line": 1,    "desc": 3,    "pattern": r"""(.*?):(\d+):(\d+:)?\s*(.*((instantiated)|(required)) from .*)"""},
-                    {"type": "error",   "file": 0,    "line": 1,    "desc": 6,    "pattern": r"""(.*?):(\d+):(\d+:)?\s*(([Ee]rror)|(ERROR)): (.*)"""},
-                    {"type": "warning", "file": 0,    "line": 1,    "desc": 6,    "pattern": r"""(.*?):(\d+):(\d+:)?\s*(([Ww]arning)|(WARNING)): (.*)"""},
-                    {"type": "info",    "file": 0,    "line": 1,    "desc": 8,    "pattern": r"""(.*?):(\d+):(\d+:)?\s*(([Nn]ote)|(NOTE)|([Ii]nfo)|(INFO)): (.*)"""},
-                    {"type": "error",   "file": 0,    "line": 1,    "desc": 3,    "pattern": r"""(.*?):(\d+):(\d+:)? (.*)"""}]
-    ld_patterns =  [{"type": "ignore",  "file": 0,    "line": None, "desc": 2,    "pattern": r"""(.*?):?(\(\.\w+\+.*\))?:\s*(In function [`'"](.*)['"]:)"""},
-                    {"type": "warning", "file": 0,    "line": 1,    "desc": 4,    "pattern": r"""(.*?):(\d+):(\d+:)? ([Ww]arning:)?\s*(the use of [`'"](.*)['"] is dangerous, better use [`'"](.*)['"].*)"""},
-                    {"type": "warning", "file": 0,    "line": None, "desc": 1,    "pattern": r"""(.*?):?\(\.\w+\+.*\): [Ww]arning:? (.*)"""},
-                    {"type": "error",   "file": 0,    "line": None, "desc": 1,    "pattern": r"""(.*?):?\(\.\w+\+.*\): (.*)"""},
-                    {"type": "warning", "file": None, "line": None, "desc": 2,    "pattern": r"""(.*[/\\])?ld(\.exe)?: [Ww]arning:? (.*)"""},
-                    {"type": "error",   "file": None, "line": None, "desc": 2,    "pattern": r"""(.*[/\\])?ld(\.exe)?: (.*)"""}]
+    gcc_patterns = [{'type': 'ignore',  'file': None, 'line': None, 'desc': None, 'pattern': r"""(.*?):(\d+):(\d+:)? .*\(Each undeclared identifier is reported only once.*"""},
+                    {'type': 'ignore',  'file': None, 'line': None, 'desc': None, 'pattern': r"""(.*?):(\d+):(\d+:)? .*for each function it appears in.\).*"""},
+                    {'type': 'ignore',  'file': None, 'line': None, 'desc': None, 'pattern': r"""(.*?):(\d+):(\d+:)? .*this will be reported only once per input file.*"""},
+                    {'type': 'error',   'file': 0,    'line': 1,    'desc': 3,    'pattern': r"""(.*?):(\d+):(\d+:)? [Ee]rror: ([`'"](.*)['"] undeclared .*)"""},
+                    {'type': 'error',   'file': 0,    'line': 1,    'desc': 3,    'pattern': r"""(.*?):(\d+):(\d+:)? [Ee]rror: (conflicting types for .*[`'"](.*)['"].*)"""},
+                    {'type': 'error',   'file': 0,    'line': 1,    'desc': 3,    'pattern': r"""(.*?):(\d+):(\d+:)? (parse error before.*[`'"](.*)['"].*)"""},
+                    {'type': 'warning', 'file': 0,    'line': 1,    'desc': 3,    'pattern': r"""(.*?):(\d+):(\d+:)? [Ww]arning: ([`'"](.*)['"] defined but not used.*)"""},
+                    {'type': 'warning', 'file': 0,    'line': 1,    'desc': 3,    'pattern': r"""(.*?):(\d+):(\d+:)? [Ww]arning: (conflicting types for .*[`'"](.*)['"].*)"""},
+                    {'type': 'warning', 'file': 0,    'line': 1,    'desc': 4,    'pattern': r"""(.*?):(\d+):(\d+:)? ([Ww]arning:)?\s*(the use of [`'"](.*)['"] is dangerous, better use [`'"](.*)['"].*)"""},
+                    {'type': 'info',    'file': 0,    'line': 1,    'desc': 3,    'pattern': r"""(.*?):(\d+):(\d+:)?\s*(.*((instantiated)|(required)) from .*)"""},
+                    {'type': 'error',   'file': 0,    'line': 1,    'desc': 6,    'pattern': r"""(.*?):(\d+):(\d+:)?\s*(([Ee]rror)|(ERROR)): (.*)"""},
+                    {'type': 'warning', 'file': 0,    'line': 1,    'desc': 6,    'pattern': r"""(.*?):(\d+):(\d+:)?\s*(([Ww]arning)|(WARNING)): (.*)"""},
+                    {'type': 'info',    'file': 0,    'line': 1,    'desc': 8,    'pattern': r"""(.*?):(\d+):(\d+:)?\s*(([Nn]ote)|(NOTE)|([Ii]nfo)|(INFO)): (.*)"""},
+                    {'type': 'error',   'file': 0,    'line': 1,    'desc': 3,    'pattern': r"""(.*?):(\d+):(\d+:)? (.*)"""}]
+    ld_patterns =  [{'type': 'ignore',  'file': 0,    'line': None, 'desc': 2,    'pattern': r"""(.*?):?(\(\.\w+\+.*\))?:\s*(In function [`'"](.*)['"]:)"""},
+                    {'type': 'warning', 'file': 0,    'line': 1,    'desc': 4,    'pattern': r"""(.*?):(\d+):(\d+:)? ([Ww]arning:)?\s*(the use of [`'"](.*)['"] is dangerous, better use [`'"](.*)['"].*)"""},
+                    {'type': 'warning', 'file': 0,    'line': None, 'desc': 1,    'pattern': r"""(.*?):?\(\.\w+\+.*\): [Ww]arning:? (.*)"""},
+                    {'type': 'error',   'file': 0,    'line': None, 'desc': 1,    'pattern': r"""(.*?):?\(\.\w+\+.*\): (.*)"""},
+                    {'type': 'warning', 'file': None, 'line': None, 'desc': 2,    'pattern': r"""(.*[/\\])?ld(\.exe)?: [Ww]arning:? (.*)"""},
+                    {'type': 'error',   'file': None, 'line': None, 'desc': 2,    'pattern': r"""(.*[/\\])?ld(\.exe)?: (.*)"""}]
     for p in gcc_patterns:
-        p["cpattern"] = re.compile(p["pattern"])
+        p['cpattern'] = re.compile(p['pattern'])
     for p in ld_patterns:
-        p["cpattern"] = re.compile(p["pattern"])
+        p['cpattern'] = re.compile(p['pattern'])
 
     def parse(self, data):
         messages = []
         for l in data.split('\n'):
             for p in CompilerGccParser.gcc_patterns:
-                match = p["cpattern"].match(l)
+                match = p['cpattern'].match(l)
                 if match is not None:
                     groups = match.groups()
-                    _type = p["type"]
-                    _file = None if p["file"] is None else groups[p["file"]]
-                    line  = None if p["line"] is None else groups[p["line"]]
-                    desc  = None if p["desc"] is None else groups[p["desc"]]
+                    _type = p['type']
+                    _file = None if p['file'] is None else groups[p['file']]
+                    line  = None if p['line'] is None else groups[p['line']]
+                    desc  = None if p['desc'] is None else groups[p['desc']]
                     m = Message(_type=_type, _file=_file, line=line, desc=desc)
                     messages.append(m)
             for p in CompilerGccParser.ld_patterns:
-                match = p["cpattern"].match(l)
+                match = p['cpattern'].match(l)
                 if match is not None:
                     groups = match.groups()
-                    _type = p["type"]
-                    _file = None if p["file"] is None else groups[p["file"]]
-                    line  = None if p["line"] is None else groups[p["line"]]
-                    desc  = None if p["desc"] is None else groups[p["desc"]]
+                    _type = p['type']
+                    _file = None if p['file'] is None else groups[p['file']]
+                    line  = None if p['line'] is None else groups[p['line']]
+                    desc  = None if p['desc'] is None else groups[p['desc']]
                     m = Message(_type=_type, _file=_file, line=line, desc=desc)
                     messages.append(m)
         return messages
@@ -239,25 +245,25 @@ class CompilerGccParser(object):
 class CompilerGcc(object):
     def __init__(self, flags=None):
         if flags is None:
-            flags = ["-static", "-std=c99", "-O0", "-g", "-Wall", "-Wextra"]
+            flags = ['-static', '-std=c99', '-O0', '-g', '-Wall', '-Wextra']
         self.flags = flags
         self.parser = CompilerGccParser()
 
     def compile(self, project):
-        cmd  = ["gcc"]
+        cmd  = ['gcc']
         cmd += self.flags
-        cmd += ["-fmessage-length=0"]
-#        cmd += ["-I{project_include}".format(project_include=project.target)]
-        cmd += ["-I{include}".format(include=include) for include in project.include]
-        cmd += ["-o", os.path.join(project.tempdir, project.target)]
+        cmd += ['-fmessage-length=0']
+#        cmd += ['-I{project_include}'.format(project_include=project.target)]
+        cmd += ['-I{include}'.format(include=include) for include in project.include]
+        cmd += ['-o', os.path.join(project.tempdir, project.target)]
         cmd += project.file_list
-        cmd += ["-lcunit"]
-        cmd += ["-l{lib}".format(lib=lib) for lib in project.libs]
+        cmd += ['-lcunit']
+        cmd += ['-l{lib}'.format(lib=lib) for lib in project.libs]
 
         proc = subprocess.Popen(cmd, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         outs, errs = proc.communicate()
         messages = self.parser.parse(errs)
-        return ReportPart("gcc", proc.returncode, messages)
+        return ReportPart('gcc', proc.returncode, messages)
 
 
 class CppCheckParser(object):
@@ -269,14 +275,14 @@ class CppCheckParser(object):
         errors = tree.findall('errors/error')
         for e in errors:
             locations = e.findall('location')
-            _file = ""
-            line  = ""
+            _file = ''
+            line  = ''
             for l in locations:
-                _file = l.attrib["file"]
-                line  = l.attrib["line"]
+                _file = l.attrib['file']
+                line  = l.attrib['line']
                 # first location is primary
                 break
-            messages.append(Message(_type=e.attrib["severity"], _file=_file, line=line, desc=e.attrib["verbose"]))
+            messages.append(Message(_type=e.attrib['severity'], _file=_file, line=line, desc=e.attrib['verbose']))
         return messages
 
 
@@ -285,17 +291,17 @@ class CppCheck(object):
         self.parser = CppCheckParser()
 
     def check(self, project):
-        cmd  = ["cppcheck"]
+        cmd  = ['cppcheck']
         # do not let CppCheck complain when it is to stupid to find systems includes
-        cmd += ["--suppress=missingIncludeSystem"]
-        cmd += ["-I{include}".format(include=include) for include in project.include]
-        cmd += ["--std=c99", "--enable=all", "--xml-version=2"]
+        cmd += ['--suppress=missingIncludeSystem']
+        cmd += ['-I{include}'.format(include=include) for include in project.include]
+        cmd += ['--std=c99', '--enable=all', '--xml-version=2']
         cmd += project.file_list
 
         proc = subprocess.Popen(cmd, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         outs, errs = proc.communicate()
         messages = self.parser.parse(errs)
-        return ReportPart("cppcheck", proc.returncode, messages)
+        return ReportPart('cppcheck', proc.returncode, messages)
 
 
 class CunitParser(object):
@@ -311,6 +317,8 @@ class CunitParser(object):
         self.list_of_tests = defaultdict(dict)
 
     def parse(self, data):
+        if not data:
+            raise ValueError('No data to parse.')
         messages = []
         tree = xml.etree.ElementTree.fromstring(data)
         suites = tree.findall('CUNIT_RESULT_LISTING/CUNIT_RUN_SUITE')
@@ -336,8 +344,8 @@ class CunitParser(object):
                     t_file = t_failure.find('FILE_NAME').text
                     t_line = t_failure.find('LINE_NUMBER').text
                     t_cond = t_failure.find('CONDITION').text
-                    messages.append(Message(_type="error", _file=t_file, line=t_line,
-                                            desc="{suite} - {test} - Condition: {cond}".format(suite=s_name, test=t_name, cond=t_cond)))
+                    messages.append(Message(_type='error', _file=t_file, line=t_line,
+                                            desc='{suite} - {test} - Condition: {cond}'.format(suite=s_name, test=t_name, cond=t_cond)))
                     self.add_test_result(s_name, t_name, False)
                 elif t_success is not None:
                     t_name = t_success.find('TEST_NAME').text
@@ -393,11 +401,12 @@ class CunitChecker(object):
     """
     def __init__(self):
         self.parser = CunitParser()
-        self.report_name = "cunit"
+        self.report_name = 'cunit'
 
     def run(self, project):
-        docker_runner = DockerRunner()
-        error_code, data = docker_runner.run(project)
+        #runner = DockerRunner()
+        runner = VMRunner()
+        error_code, data = runner.run(project)
         if error_code:
             return ReportPart(self.report_name, error_code, [])
         else:
@@ -405,47 +414,154 @@ class CunitChecker(object):
             return ReportPart(self.report_name, error_code, messages, self.parser.list_of_tests)
 
 
-class DockerRunner(object):
+class VMRunner(object):
+    """
+    Runs a project inside a existing Linux VM. The VM should run a relatively
+    new version of either Debian Linux or Ubuntu. Except for the SSH server no
+    additional software components are necessary.
+
+    After installation of SSH server a new user "testrunner" has to be added:
+        useradd testrunner
+
+    For security reasons the PAM limits have to be changed in
+    /etc/security/limits.conf:
+        testrunner	hard	  nproc	      10
+        testrunner	hard	  nofile      200
+        testrunner  hard	  core		  500000
+        testrunner  hard      data        500000
+        testrunner  hard      fsize       500000
+        testrunner  hard      stack       500000
+        testrunner  hard      cpu         5
+        testrunner  hard      as          500000
+        testrunner  hard      nice        20
+        testrunner	hard	  maxlogins	  1
+
+    Finally the settings for connecting the VM (host, user, password, remote
+    path) via SSH have to be adjusted.
+    """
     def __init__(self):
-        self.client = docker.Client(version="1.17")
+        # timeout for execution in VM in seconds
+        self.timeout = 5
+        # settings for connecting the VM via SSH
+        self.host = '192.168.10.130'
+        self.username = 'testrunner'
+        self.password = '1234'
+        self.remote_path = '/home/testrunner/runner/'
+
+    def rmtree(self, sftp, remotepath, level=0):
+        """
+        Deletes a whole directory including all sub-directories and all their
+        files via SFTP. The function needs a connection to the SFTP server (uses
+        Python library paramiko) and the path on the remote host.
+
+        Source: http://stackoverflow.com/questions/3406734/how-to-delete-all-files-in-directory-on-remote-server-in-python
+        """
+        for f in sftp.listdir_attr(remotepath):
+            rpath = posixpath.join(remotepath, f.filename)
+            if stat.S_ISDIR(f.st_mode):
+                self.rmtree(sftp, rpath, level=(level + 1))
+            else:
+                rpath = posixpath.join(remotepath, f.filename)
+                print('[Remote] Removing %s%s' % ('    ' * level, rpath))
+                sftp.remove(rpath)
+        print('[Remote] Removing %s%s' % ('    ' * level, remotepath))
+        sftp.rmdir(remotepath)
+
+    def run(self, project):
+        if not os.path.exists(os.path.join(project.tempdir, project.target)):
+            raise FileNotFoundError('Error: Executable file has not been created!')
+        copy_to_vm = [os.path.join(project.tempdir, project.target)]
+        copy_from_vm = ['CUnitAutomated-Results.xml']
+        print('Connecting to remote machine...')
+        client = SSHClient()
+        client.set_missing_host_key_policy(AutoAddPolicy())
+        client.load_system_host_keys()
+        client.connect(self.host, username=self.username, password=self.password)
+        return_code = 0
+        data = ''
+        with client.open_sftp() as sftp:
+            try:
+                self.rmtree(sftp, self.remote_path)
+            except FileNotFoundError:
+                pass
+            try:
+                sftp.mkdir(self.remote_path)
+            except OSError:
+                pass
+            for f in copy_to_vm:
+                remote_file = os.path.join(self.remote_path, os.path.basename(f))
+                sftp.put(f, remote_file)
+                sftp.chmod(remote_file, 0o777)
+                stdin, stdout, stderr = client.exec_command('cd {}; timeout {}s {}'.format(self.remote_path, self.timeout, remote_file))
+                return_code = stdout.channel.recv_exit_status()
+                print('[Remote] Error code: {}'.format(return_code))
+                stdout_string = '[Remote] ' + ''.join(stdout)
+                if stdout_string:
+                    print('[Remote] STDOUT:')
+                    print(stdout_string)
+                stderr_string = '[Remote] ' + ''.join(stderr)
+                if stderr_string:
+                    print('[Remote] STDERR:')
+                    print(stderr_string)
+            for f in copy_from_vm:
+                # get all result files
+                remote_file = os.path.join(self.remote_path, os.path.basename(f))
+                try:
+                    with tempfile.TemporaryFile() as local_file:
+                        sftp.getfo(remote_file, local_file)
+                        local_file.seek(0)
+                        data = local_file.read()
+                except FileNotFoundError:
+                    print('Remote file not found!')
+            # delete all files in home directory
+            self.rmtree(sftp, self.remote_path)
+        return (return_code, data)
+
+
+class DockerRunner(object):
+    """
+    Runs a project inside a Docker container.
+    """
+    def __init__(self):
+        self.client = docker.Client(version='1.17')
         self.client.info()
         self.DOCKER_TIMEOUT = 2
 
     def run(self, project):
         """
-        Runs a alredy compiled project inside a secure enviroment. This runner
+        Runs a already compiled project inside a secure enviroment. This runner
         class uses a Docker container with restricted permissions to encapsulate
         the untrusted executable.
 
         :param project: project object containing all necessary file names etc.
         :returns: tuple containing the error code and the unit test results
         """
-        img = "autotest/" + project.target
+        img = 'autotest/' + project.target
         self.build_image(project, img)
         error_code, cont = self.start_container(img)
         if error_code:
             return (error_code, None)
-        data = self.extract_file_from_container(cont, "CUnitAutomated-Results.xml")
+        data = self.extract_file_from_container(cont, 'CUnitAutomated-Results.xml')
         self.stop_container(cont, img)
         return (0, data)
 
     def build_image(self, project, img):
         # check whether target file exists (has been compiled correctly)
         if not os.path.exists(os.path.join(project.tempdir, project.target)):
-            raise FileNotFoundError("Error: Executable file has not been created!")
+            raise FileNotFoundError('Error: Executable file has not been created!')
         dockerfile = """FROM scratch
                         COPY {target} /
                         CMD ["/{target}"]
                      """
         # build Dockerfile and Docker image
         # TODO: this should be possible in-memory
-        with open(os.path.join(project.tempdir, "Dockerfile"), "w") as fd:
+        with open(os.path.join(project.tempdir, 'Dockerfile'), 'w') as fd:
             fd.write(dockerfile.format(target=project.target))
         container_limits = {}
         container_limits['memory'] = 2**22      # memory limit for build
         container_limits['memswap'] = 2**22     # memory + swap, -1 to disable swap
         container_limits['cpushares'] = 10      # CPU shares (relative weight)
-        container_limits['cpusetcpus'] = "0"    # CPUs in which to allow exection, e.g., "0-3", "0,1"
+        container_limits['cpusetcpus'] = '0'    # CPUs in which to allow exection, e.g., '0-3', '0,1'
         #container_limits['cpu-quota'] = 10000   # 10% of CPU for this container
         build_out = self.client.build(path=project.tempdir, tag=img, rm=True, stream=False)
         [_ for _ in build_out]
@@ -498,13 +614,13 @@ class DockerRunner(object):
     def extract_file_from_container(self, cont, file_name):
         # extract unit test results from container (returned by dockerpy as tar stream)
         try:
-            temp = self.client.copy(container=cont, resource="/{}".format(file_name))
+            temp = self.client.copy(container=cont, resource='/{}'.format(file_name))
         except docker.errors.APIError as e:
             self.stop_container(cont, img)
             # TODO: is there a better way to check and handle this?!
             if 'Could not find the file' in e.explanation.decode('utf-8'):
                 print('Could not extract cunit results. Maybe source does not contain test?!')
-            return ReportPart("cunit", -1, [])
+            return ReportPart('cunit', -1, [])
         buffer = BytesIO(temp.read())
         date = ''
         with tarfile.open(fileobj=buffer, mode='r') as tar:
@@ -566,8 +682,8 @@ class Project(object):
         	</File>
         </CodeBlocks_layout_file>
     """
-    cb_unit_template = """<Unit filename="{filename}"><Option compilerVar="CC" /></Unit>"""
-    cb_unit_h_template = """<Unit filename="{filename}" />"""
+    cb_unit_template = '<Unit filename="{filename}"><Option compilerVar="CC" /></Unit>'
+    cb_unit_h_template = '<Unit filename="{filename}" />'
 
     def __init__(self, target, file_list, libs=None, includes=None):
         if libs is None:
@@ -584,16 +700,16 @@ class Project(object):
         # characters are a no go! Equal signs (used as padding in Base64) have
         # to be stripped from the because they are not valid in docker repo
         # name! (See: https://github.com/docker/docker/issues/2105)
-        self.target = base64.b64encode(self.project_name.encode("utf-8")).decode("utf-8").lower().replace("=", "")
+        self.target = base64.b64encode(self.project_name.encode('utf-8')).decode('utf-8').lower().replace('=', '')
 
         for f in self.file_list:
             if not os.path.isfile(f):
-                raise FileNotFoundError("Source file {} not found!".format(f))
+                raise FileNotFoundError('Source file {} not found!'.format(f))
 
         # TODO: test if libs are installed?!
 
 
-    def create_cb_project(self, file_name="project.zip"):
+    def create_cb_project(self, file_name='project.zip'):
         """
         Create a CodeBlocks project inside a ZIP file. A XML project file
         contains links to all source and header files and sets all necessary
@@ -603,9 +719,9 @@ class Project(object):
         :param file_name: name for ZIP file containing CodeBlocks project
         :returns: name of ZIP file containing CodeBlocks project
         """
-        unit_str = ""
-        include_dirs = ""
-        with ZipFile(file_name, "w") as project_zip:
+        unit_str = ''
+        include_dirs = ''
+        with ZipFile(file_name, 'w') as project_zip:
             already_packed_files = []
             # include all code files
             for f in self.file_list:
@@ -618,7 +734,7 @@ class Project(object):
                 # set path to include files for compiler
                 #include_dirs += """<Add directory="{dir}" />""".format(dir=d)
                 # add all header in include directories in project
-                for f in glob.glob(d + "/*.h"):
+                for f in glob.glob(d + '/*.h'):
                     if f not in already_packed_files:
                         only_file_name = os.path.basename(f)
                         project_zip.write(f, only_file_name)
@@ -626,33 +742,33 @@ class Project(object):
                         already_packed_files.append(f)
             # include description file
             task_directory = os.path.dirname(os.path.dirname(self.file_list[0]))
-            description_file_name = "description.md"
+            description_file_name = 'description.md'
             description_file = os.path.join(task_directory, description_file_name)
             unit_str += self.cb_unit_h_template.format(filename=description_file_name)
             project_zip.write(description_file, description_file_name)
             # include project file
             with tempfile.NamedTemporaryFile() as buffer:
                 buffer.write(self.cb_project_template.format(title=self.project_name, units=unit_str,
-                                                             include_dirs=include_dirs).encode("utf-8"))
+                                                             include_dirs=include_dirs).encode('utf-8'))
                 buffer.flush()
-                project_zip.write(buffer.name, "{}.cbp".format(self.project_name))
+                project_zip.write(buffer.name, '{}.cbp'.format(self.project_name))
             # include layout file
             with tempfile.NamedTemporaryFile() as buffer:
-                buffer.write(self.cb_layout_template.encode("utf-8"))
+                buffer.write(self.cb_layout_template.encode('utf-8'))
                 buffer.flush()
-                project_zip.write(buffer.name, "{}.layout".format(self.project_name))
+                project_zip.write(buffer.name, '{}.layout'.format(self.project_name))
         return file_name
 
 
 class Task(object):
     """
-        Represents one Task. Contains all Informations, to create 'packs' of
+        Represents one Task. Contains all Informations, to create "packs" of
         files to check, compile or distribute.
 
         :ivar name          Name of the task.
         :ivar desc          Path to description file.
         :ivar scr_dir       Base dir for all files.
-        :ivar files         General files included in all other 'filesets'
+        :ivar files         General files included in all other "filesets"
         :ivar files_main    Files used for executing.
         :ivar files_test    Files used for testing.
         :ivar files_student Files to be added by the student or for the student in a cb project.
@@ -660,16 +776,16 @@ class Task(object):
 
     def __init__(self, path):
         self.path = path
-        with open(os.path.join(path, "config.json"), "r") as fd:
+        with open(os.path.join(path, 'config.json'), 'r') as fd:
             data = json.load(fd)
-        self.name          = data["name"]
-        self.desc          = data["desc"]
-        self.libs          = data["libs"]
-        self.src_dir       = data["src_dir"]
-        self.files         = data["files"]
-        self.files_main    = data["files_main"]
-        self.files_test    = data["files_test"]
-        self.files_student = data["files_student"]
+        self.name          = data['name']
+        self.desc          = data['desc']
+        self.libs          = data['libs']
+        self.src_dir       = data['src_dir']
+        self.files         = data['files']
+        self.files_main    = data['files_main']
+        self.files_test    = data['files_test']
+        self.files_student = data['files_student']
 
     def get_main_project(self, solution):
         file_list = []
@@ -736,32 +852,32 @@ class ConCoCt(object):
     def check_env(self):
         # gcc
         try:
-            subprocess.call(["gcc", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.call(['gcc', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
-            raise FileNotFoundError("gcc not found!")
+            raise FileNotFoundError('gcc not found!')
         # cppcheck
         try:
-            subprocess.call(["cppcheck", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.call(['cppcheck', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
-            raise FileNotFoundError("cppcheck not found!")
+            raise FileNotFoundError('cppcheck not found!')
         # docker
         try:
-            proc = subprocess.call(["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.call(['docker', 'info'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
-            raise FileNotFoundError("docker not found!")
+            raise FileNotFoundError('docker not found!')
         if proc != 0:
-            raise FileNotFoundError("docker found but permission denied. Is user in group 'docker'?")
+            raise FileNotFoundError('docker found but permission denied. Is user in group "docker"?')
         # cunit
         try:
-            proc = subprocess.call(["ld", "-lcunit", "-o{tmpfile}".format(tmpfile=os.path.join(self.tempdir.name, "__ld_check.out"))], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = subprocess.call(['ld', '-lcunit', '-o{tmpfile}'.format(tmpfile=os.path.join(self.tempdir.name, '__ld_check.out'))], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
-            raise FileNotFoundError("ld not found!")
+            raise FileNotFoundError('ld not found!')
         if proc != 0:
-            raise FileNotFoundError("cunit not found!")
+            raise FileNotFoundError('cunit not found!')
         # docker-py
-        version_info = tuple([int(d) for d in docker.version.split("-")[0].split(".")])
+        version_info = tuple([int(d) for d in docker.version.split('-')[0].split('.')])
         if version_info[0] < 1 or version_info[0] == 1 and version_info[1] < 2:
-            raise FileNotFoundError("docker-py version to old!")
+            raise FileNotFoundError('docker-py version to old!')
 
     def check_project(self, project):
         # TODO: move temp dir to project class
@@ -774,14 +890,14 @@ class ConCoCt(object):
             _r = CompilerGcc().compile(project)
             r.add_part(_r)
         else:
-            print("Error: Could not run compiler because CppCheck returned error code.")
+            print('Error: Could not run compiler because CppCheck returned error code.')
         if _r.returncode == 0:
             checker = CunitChecker()
             _r = checker.run(project)
             self.print_unit_test_results(checker.parser.list_of_tests)
             r.add_part(_r)
         else:
-            print("Error: Could not run unit tests because Compiler returned error code.")
+            print('Error: Could not run unit tests because Compiler returned error code.')
 
         project.tempdir = None
         return r
@@ -794,21 +910,21 @@ class ConCoCt(object):
                             suites and their unit tests
         """
         if testresults:
-            print("=====")
+            print('=====')
             for suite in sorted(testresults):
-                print("Suite: {}".format(suite))
+                print('Suite: {}'.format(suite))
                 for test in sorted(testresults[suite]):
-                    print("{:30s} - {}".format(test, 'success' if testresults[suite][test] else 'failure'))
-            print("=====")
+                    print('{:30s} - {}'.format(test, 'success' if testresults[suite][test] else 'failure'))
+            print('=====')
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Simple gcc wrapper.')
+    parser = argparse.ArgumentParser(description='libConCoct - Builds simple C programs and runs unit tests.')
     parser.add_argument('--version', action='version', version='%(prog)s ' + __version__)
     cmd_options = parser.parse_args()
 
 
-def find_all_tasks(tasks_path="tasks"):
+def find_all_tasks(tasks_path='tasks'):
     tasks = []
     for d in os.listdir(tasks_path):
         try:
@@ -827,13 +943,13 @@ if __name__ == '__main__':
     except FileNotFoundError as e:
         sys.exit(e)
 
-    t = Task(os.path.join("tasks", "greaterZero"))
+    t = Task(os.path.join('tasks', 'greaterZero'))
     s1 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user1/solution.c', ))
     s2 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user2/solution.c', ))
     s3 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/kill_container.c', ))
 
     # create test project and unit test it
-    p = t.get_test_project(s3)
+    p = t.get_test_project(s1)
     r = w.check_project(p)
     print(r)
 
