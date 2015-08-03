@@ -36,6 +36,7 @@ import hashlib
 import base64
 from zipfile import ZipFile
 import tempfile
+from requests.exceptions import ReadTimeout
 
 
 __version__ = '0.1.0'
@@ -359,13 +360,76 @@ class CunitParser(object):
 
 
 class CunitChecker(object):
+    """
+    Executes the compiled executable and checks all unit tests. Returned will be
+    a XML report by CUnit that can be evaluated later.
+
+    For security, currently a Docker container is used. Possible security
+    solutions:
+    * Docker container - Not inherently secure, has to be improved with apparmor
+      profile and lxc directives.
+    * ptrace - Linux kernels system call policy enforcer
+    * lxc - Linux container, defines namespaces in kernel for all ressources
+      See: https://help.ubuntu.com/lts/serverguide/lxc.html
+    * systrace - enforces system call policies based on ptrace backend on Linux
+    * VirtualBox - Full blown virtual machine with all its overhead, difficult
+      to control from host machine and to get files inside the VM.
+      Control via Python ("vbox" or better "pyvbox")
+      See: http://stackoverflow.com/questions/21324153/how-to-read-files-from-a-virtual-machine-using-python
+    * QEMU - Virtual machine
+    * KVM, XEN - Kernel based virtualisation, light-weight technique based on
+      hypervisor virtualisation.
+    * seccomp - Googles solution developed for Chrome, allows one-way transition
+      into a "secure" state where it cannot make any system calls except exit(),
+      read() and write() to already-open file descriptors. (already in kernel)
+    * Fakeroot-ng - wrap all system calls that program performs so that it
+      thinks it is running as root.
+    * Proot [http://proot.me/]
+    * geordi - C++ eval bot, not suitable
+
+    See also:
+    * http://stackoverflow.com/questions/4249063/run-an-untrusted-c-program-in-a-sandbox-in-linux-that-prevents-it-from-opening-f
+    * http://unix.stackexchange.com/questions/6433/how-to-jail-a-process-without-being-root/6455#6455
+    """
     def __init__(self):
         self.parser = CunitParser()
-        self.client = docker.Client(version="1.17")
-        self.client.info()
+        self.report_name = "cunit"
 
     def run(self, project):
+        docker_runner = DockerRunner()
+        error_code, data = docker_runner.run(project)
+        if error_code:
+            return ReportPart(self.report_name, error_code, [])
+        else:
+            messages = self.parser.parse(data)
+            return ReportPart(self.report_name, error_code, messages, self.parser.list_of_tests)
+
+
+class DockerRunner(object):
+    def __init__(self):
+        self.client = docker.Client(version="1.17")
+        self.client.info()
+        self.DOCKER_TIMEOUT = 2
+
+    def run(self, project):
+        """
+        Runs a alredy compiled project inside a secure enviroment. This runner
+        class uses a Docker container with restricted permissions to encapsulate
+        the untrusted executable.
+
+        :param project: project object containing all necessary file names etc.
+        :returns: tuple containing the error code and the unit test results
+        """
         img = "autotest/" + project.target
+        self.build_image(project, img)
+        error_code, cont = self.start_container(img)
+        if error_code:
+            return (error_code, None)
+        data = self.extract_file_from_container(cont, "CUnitAutomated-Results.xml")
+        self.stop_container(cont, img)
+        return (0, data)
+
+    def build_image(self, project, img):
         # check whether target file exists (has been compiled correctly)
         if not os.path.exists(os.path.join(project.tempdir, project.target)):
             raise FileNotFoundError("Error: Executable file has not been created!")
@@ -377,39 +441,76 @@ class CunitChecker(object):
         # TODO: this should be possible in-memory
         with open(os.path.join(project.tempdir, "Dockerfile"), "w") as fd:
             fd.write(dockerfile.format(target=project.target))
+        container_limits = {}
+        container_limits['memory'] = 2**22      # memory limit for build
+        container_limits['memswap'] = 2**22     # memory + swap, -1 to disable swap
+        container_limits['cpushares'] = 10      # CPU shares (relative weight)
+        container_limits['cpusetcpus'] = "0"    # CPUs in which to allow exection, e.g., "0-3", "0,1"
+        #container_limits['cpu-quota'] = 10000   # 10% of CPU for this container
         build_out = self.client.build(path=project.tempdir, tag=img, rm=True, stream=False)
         [_ for _ in build_out]
 
+    def start_container(self, img):
         # create container and start it (start unit tests, see Dockerfile)
         # TODO: check if image was created
-        cont = self.client.create_container(image=img)
-        self.client.start(container=cont)
+        cont = self.client.create_container(image=img, network_disabled=True, mem_limit='4m', cpu_shares=10, memswap_limit=2**22)
+        self.client.start(container=cont, network_mode='none', lxc_conf='lxc.cgroup.cpu.cfs_quota_us = 10000') # lxc.cgroup.memory.limit_in_bytes=4m')
+
+        # Adds support for `--ulimit` parameter introduced in Docker 1.6
+        # https://github.com/docker/docker/pull/9437
+        # https://github.com/docker/docker/issues/6479
+        # https://devlearnings.wordpress.com/2014/08/22/limiting-fork-bomb-in-docker/
+
+        # Additional options for client.start():
+        # security_opt='apparmor:PROFILE'
+        # cap_add: Add Linux capabilities
+        # cap_drop: Drop Linux capabilities
+        # privileged=false: Give extended privileges to this container
+        # devices: Allows you to run devices inside the container without the --privileged flag.
+        # lxc-conf: Add custom lxc options
+        #   lxc.cgroup.memory.limit_in_bytes = 512M
+        #   lxc.cgroup.cpu.cfs_quota_us=50000  (see https://www.kernel.org/doc/Documentation/scheduler/sched-bwc.txt)
+        # Source: https://docs.docker.com/reference/run/#runtime-privilege-linux-capabilities-and-lxc-configuration
+
+        # output stdout from container
         #out = self.client.attach(container=cont, logs=True)
         #print(out.decode('utf-8'))
-        ret_val = self.client.wait(container=cont)
+
+        # wait for container to exit or to reach the time out
+        try:
+            ret_val = self.client.wait(container=cont, timeout=self.DOCKER_TIMEOUT)
+        except ReadTimeout:
+            self.stop_container(cont, img)
+            print('Timeout for container execution was reached')
+            return (-1, None)
         # catch problem when unit test executable returns with error code
         if ret_val != 0:
+            self.stop_container(cont, img)
             print('Error code returned: {}'.format(ret_val))
-            return ReportPart("cunit", ret_val, [])
+            return (ret_val, None)
+        return (0, cont)
 
+    def stop_container(self, cont, img):
+        self.client.stop(container=cont)
+        self.client.remove_container(container=cont)
+        self.client.remove_image(image=img)
+
+    def extract_file_from_container(self, cont, file_name):
+        # extract unit test results from container (returned by dockerpy as tar stream)
         try:
-            temp = self.client.copy(container=cont, resource="/CUnitAutomated-Results.xml")
+            temp = self.client.copy(container=cont, resource="/{}".format(file_name))
         except docker.errors.APIError as e:
+            self.stop_container(cont, img)
             # TODO: is there a better way to check and handle this?!
             if 'Could not find the file' in e.explanation.decode('utf-8'):
                 print('Could not extract cunit results. Maybe source does not contain test?!')
             return ReportPart("cunit", -1, [])
         buffer = BytesIO(temp.read())
+        date = ''
         with tarfile.open(fileobj=buffer, mode='r') as tar:
-            with tar.extractfile('CUnitAutomated-Results.xml') as fd:
+            with tar.extractfile(file_name) as fd:
                 data = fd.read()
-
-        self.client.stop(container=cont)
-        self.client.remove_container(container=cont)
-        self.client.remove_image(image=img)
-
-        messages = self.parser.parse(data)
-        return ReportPart("cunit", 0, messages, self.parser.list_of_tests)
+        return data
 
 
 class Project(object):
@@ -729,12 +830,13 @@ if __name__ == '__main__':
     t = Task(os.path.join("tasks", "greaterZero"))
     s1 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user1/solution.c', ))
     s2 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user2/solution.c', ))
+    s3 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/kill_container.c', ))
 
     # create test project and unit test it
-    #p = t.get_test_project(s2)
-    #r = w.check_project(p)
-    #print(r)
+    p = t.get_test_project(s3)
+    r = w.check_project(p)
+    print(r)
 
     # create CodeBlocks project
-    p = t.get_main_project(None)
-    p.create_cb_project()
+    #p = t.get_main_project(None)
+    #p.create_cb_project()
