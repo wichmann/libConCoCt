@@ -25,7 +25,7 @@ from libConCoCt import Task, Solution, ConCoCt
 # CELERY SETTINGS
 BROKER_URL = 'amqp://'
 BACKEND = 'amqp'
-CELERY_ACCEPT_CONTENT = ['pickle', 'json']
+CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 
