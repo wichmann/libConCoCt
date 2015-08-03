@@ -17,9 +17,9 @@ import time
 import os
 from libConCoCt import Task, Solution
 
-# Available tasks: leapyear greaterZero
-task_directory = os.path.join('tasks', 'greaterZero')
-solution_file = (os.path.join('solutions', 'greaterZero', 'user2', 'solution.c'), )
+# Available tasks: leapyear greaterZero, fizzbuzz
+task_directory = os.path.join('tasks', 'fizzbuzz')
+solution_file = (os.path.join('solutions', 'fizzbuzz', 'user1', 'solution.c'), )
 building = celery_tasks.build_and_check_task_with_solution.delay(task_directory,
                                                                  solution_file)
 

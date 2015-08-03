@@ -515,6 +515,7 @@ class VMRunner(object):
                     print('Remote file not found!')
             # delete all files in home directory
             self.rmtree(sftp, self.remote_path)
+        client.close()
         return (return_code, data)
 
 
