@@ -23,6 +23,7 @@ Dependencies:
 import sys
 import re
 import os
+import time
 import argparse
 import subprocess
 import xml.etree.ElementTree
@@ -382,7 +383,6 @@ class CunitChecker(object):
     * systrace - enforces system call policies based on ptrace backend on Linux
     * VirtualBox - Full blown virtual machine with all its overhead, difficult
       to control from host machine and to get files inside the VM.
-      Control via Python ("vbox" or better "pyvbox")
       See: http://stackoverflow.com/questions/21324153/how-to-read-files-from-a-virtual-machine-using-python
     * QEMU - Virtual machine
     * KVM, XEN - Kernel based virtualisation, light-weight technique based on
@@ -399,19 +399,87 @@ class CunitChecker(object):
     * http://stackoverflow.com/questions/4249063/run-an-untrusted-c-program-in-a-sandbox-in-linux-that-prevents-it-from-opening-f
     * http://unix.stackexchange.com/questions/6433/how-to-jail-a-process-without-being-root/6455#6455
     """
-    def __init__(self):
+    def __init__(self, backend):
         self.parser = CunitParser()
         self.report_name = 'cunit'
+        self.backend = backend
 
     def run(self, project):
-        #runner = DockerRunner()
-        runner = VMRunner()
+        if self.backend == 'docker':
+            runner = DockerRunner()
+        else:
+            runner = VMRunner(shutdown_vm_after=False)
         error_code, data = runner.run(project)
         if error_code:
             return ReportPart(self.report_name, error_code, [])
         else:
             messages = self.parser.parse(data)
             return ReportPart(self.report_name, error_code, messages, self.parser.list_of_tests)
+
+
+class VirtualBoxControl(object):
+    """
+    Controls a virtual machine in Oracle VirtualBox on the local host machine
+    via command line.
+
+    Alternatively the VM could be controlled via Python ("vbox" or better
+    "pyvbox")
+    """
+    def __init__(self, vm_name, wait_after_boot=20):
+        self.vm_name = vm_name
+        self.wait_after_boot = wait_after_boot
+
+    def start_VM(self):
+        """
+        Starts the virtual machine with a given name in VirtualBox on the local
+        host machine.
+
+        :returns: True, if the VM has been started sucessfully, otherwise False
+        """
+        # TODO Reset to last checkpoint.
+        # TODO Let VM go to sleep instead of shutting down
+        print('Starting VM...')
+        if not self.check_VM():
+            cmd  = ['VBoxManage']
+            cmd += ['startvm']
+            cmd += [self.vm_name]
+            cmd += ['--type']
+            cmd += ['headless']
+            proc = subprocess.Popen(cmd, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            outs, errs = proc.communicate()
+            if str(outs).count('has been successfully started'):
+                print('Waiting', end='', flush=True)
+                for _ in range(self.wait_after_boot):
+                    print('.', end='', flush=True)
+                    time.sleep(1)
+                print('\nVM successfully started.')
+                return True
+            else:
+                print('VM could not be started.')
+                return False
+        return True
+
+    def stop_VM(self):
+        cmd  = ['VBoxManage']
+        cmd += ['controlvm']
+        cmd += [self.vm_name]
+        cmd += ['acpipowerbutton']
+        return_code = subprocess.call(cmd)
+        print('Shutdown: {}'.format(return_code))
+        return bool(return_code)
+
+    def check_VM(self):
+        cmd  = ['VBoxManage']
+        cmd += ['showvminfo']
+        cmd += [self.vm_name]
+        proc = subprocess.Popen(cmd, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        outs, errs = proc.communicate()
+        occurences = str(outs).count('running (since')
+        if occurences:
+            print('VM already running.')
+        else:
+            print('VM not running.')
+        return bool(occurences)
 
 
 class VMRunner(object):
@@ -439,10 +507,13 @@ class VMRunner(object):
     Finally the settings for connecting the VM (host, user, password, remote
     path) via SSH have to be adjusted.
     """
-    def __init__(self):
+    def __init__(self, shutdown_vm_after=True):
         # timeout for execution in VM in seconds
-        self.timeout = 5
+        self.timeout = 10
+        self.shutdown_vm_after = shutdown_vm_after
         # settings for connecting the VM via SSH
+        self.vm_name = 'Debian_Testing'
+        self.vm = VirtualBoxControl(self.vm_name)
         self.host = '192.168.10.130'
         self.username = 'testrunner'
         self.password = '1234'
@@ -468,6 +539,8 @@ class VMRunner(object):
         sftp.rmdir(remotepath)
 
     def run(self, project):
+        if not self.vm.start_VM():
+            return (-1, '')
         if not os.path.exists(os.path.join(project.tempdir, project.target)):
             raise FileNotFoundError('Error: Executable file has not been created!')
         copy_to_vm = [os.path.join(project.tempdir, project.target)]
@@ -476,7 +549,7 @@ class VMRunner(object):
         client = SSHClient()
         client.set_missing_host_key_policy(AutoAddPolicy())
         client.load_system_host_keys()
-        client.connect(self.host, username=self.username, password=self.password)
+        client.connect(self.host, username=self.username, password=self.password, timeout=10)
         return_code = 0
         data = ''
         with client.open_sftp() as sftp:
@@ -516,6 +589,8 @@ class VMRunner(object):
             # delete all files in home directory
             self.rmtree(sftp, self.remote_path)
         client.close()
+        if self.shutdown_vm_after:
+            self.vm.stop_VM()
         return (return_code, data)
 
 
@@ -843,8 +918,9 @@ class Solution(object):
 
 
 class ConCoCt(object):
-    def __init__(self):
+    def __init__(self, backend='vm'):
         self.tempdir = tempfile.TemporaryDirectory()
+        self.backend = backend
         self.check_env()
 
     def __del__(self):
@@ -893,7 +969,7 @@ class ConCoCt(object):
         else:
             print('Error: Could not run compiler because CppCheck returned error code.')
         if _r.returncode == 0:
-            checker = CunitChecker()
+            checker = CunitChecker(backend=self.backend)
             _r = checker.run(project)
             self.print_unit_test_results(checker.parser.list_of_tests)
             r.add_part(_r)
@@ -920,9 +996,16 @@ class ConCoCt(object):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='libConCoct - Builds simple C programs and runs unit tests.')
-    parser.add_argument('--version', action='version', version='%(prog)s ' + __version__)
+    parser = argparse.ArgumentParser(description='libConCoct - Builds simple C programs and runs unit tests.',
+                                     epilog='Copyright 2015 by Martin and Christian Wichmann')
+    parser.add_argument('-u', '--unittest', action='store_true', help='run unit tests on solution')
+    parser.add_argument('-p', '--project', action='store_true', help='create CodeBlocks project for task')
+    parser.add_argument('--project-file-name', help='name of the ZIP file containing the CodeBlocks project')
+    parser.add_argument('-t', '--task', required=True, help='task to run unit tests or create project file for')
+    parser.add_argument('-s', '--solution', type=argparse.FileType('r'), help='solution to test against unit tests')
+    parser.add_argument('-b', '--backend', choices=['vm', 'docker'], default='vm', help='backend used for running unit tests in secure environment')
     cmd_options = parser.parse_args()
+    return cmd_options
 
 
 def find_all_tasks(tasks_path='tasks'):
@@ -937,23 +1020,63 @@ def find_all_tasks(tasks_path='tasks'):
     return tasks
 
 
-if __name__ == '__main__':
-    parse_args()
+def test_examples():
     try:
         w = ConCoCt()
     except FileNotFoundError as e:
         sys.exit(e)
-
     t = Task(os.path.join('tasks', 'greaterZero'))
     s1 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user1/solution.c', ))
     s2 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user2/solution.c', ))
     s3 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/kill_container.c', ))
-
     # create test project and unit test it
-    p = t.get_test_project(s1)
+    p = t.get_test_project(s2)
     r = w.check_project(p)
     print(r)
 
+
+def build_project_examples():
+    try:
+        w = ConCoCt()
+    except FileNotFoundError as e:
+        sys.exit(e)
+    t = Task(os.path.join('tasks', 'greaterZero'))
+    s1 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user1/solution.c', ))
+    s2 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/solutions/greaterZero/user2/solution.c', ))
+    s3 = Solution(t, ('/home/christian/Programmierung/python/UpLoad2/libconcoct/kill_container.c', ))
     # create CodeBlocks project
-    #p = t.get_main_project(None)
-    #p.create_cb_project()
+    p = t.get_main_project(None)
+    p.create_cb_project()
+
+
+def run_libconcoct():
+    options = parse_args()
+    if not options.unittest and not options.project:
+        print('No action ("unittest" or "project") chosen!')
+        return
+    t = Task(options.task)
+    if options.solution:
+        s = Solution(t, (options.solution.name, ))
+    else:
+        s = None
+    if options.unittest:
+        print('Using backend: {}'.format(options.backend))
+        try:
+            w = ConCoCt(backend=options.backend)
+        except FileNotFoundError as e:
+            sys.exit(e)
+        p = t.get_test_project(s)
+        r = w.check_project(p)
+        print(r)
+    elif options.project:
+        p = t.get_main_project(s)
+        if 'project-file-name' in options:
+            p.create_cb_project(file_name=options['project-file-name'])
+        else:
+            p.create_cb_project()
+
+
+if __name__ == '__main__':
+    run_libconcoct()
+    #test_examples()
+    #build_project_examples()
