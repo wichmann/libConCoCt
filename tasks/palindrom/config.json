@@ -1,0 +1,10 @@
+{
+    "name": "Palindrom",
+    "desc": "description.md",
+    "libs": [],
+    "src_dir": "src",
+    "files": ["solution.h"],
+    "files_main": ["main.c"],
+    "files_test": ["test.c"],
+    "files_student": ["solution.c"]
+}
