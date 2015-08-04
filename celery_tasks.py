@@ -14,12 +14,14 @@ Start this worker in background with:
 
 Stop all workers with:
     ps auxww | grep 'celery worker' | awk '{print $2}' | xargs kill -9
+
+Authors: Christian Wichmann
 """
 
 
 import sys
 from celery import Celery
-from libConCoCt import Task, Solution, ConCoCt
+from libConCoct.concoct import Task, Solution, ConCoCt
 
 
 # CELERY SETTINGS

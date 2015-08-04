@@ -10,12 +10,13 @@ worker to finish.
 
 Start this example task:
     ./celery_run.py
+
+Authors: Christian Wichmann
 """
 
 import celery_tasks
 import time
 import os
-from libConCoCt import Task, Solution
 
 
 def build_example():
