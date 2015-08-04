@@ -53,6 +53,7 @@ class CompilerGccParser(object):
                     desc  = None if p['desc'] is None else groups[p['desc']]
                     m = Message(_type=_type, _file=_file, line=line, desc=desc)
                     messages.append(m)
+                    break
             for p in CompilerGccParser.ld_patterns:
                 match = p['cpattern'].match(l)
                 if match is not None:
@@ -63,6 +64,7 @@ class CompilerGccParser(object):
                     desc  = None if p['desc'] is None else groups[p['desc']]
                     m = Message(_type=_type, _file=_file, line=line, desc=desc)
                     messages.append(m)
+                    break
         return messages
 
 
