@@ -10,6 +10,8 @@ machine and run unit tests on the VM.
 Authors: Martin Wichmann, Christian Wichmann
 """
 
+from __future__ import print_function
+
 import os
 import tempfile
 import time
