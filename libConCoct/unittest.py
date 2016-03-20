@@ -21,6 +21,7 @@ import xml.etree.ElementTree
 from io import BytesIO
 import tarfile
 from requests.exceptions import ReadTimeout
+from functools import wraps
 
 # imports for VM  and docker runner
 from paramiko.client import SSHClient
@@ -210,6 +211,21 @@ class VirtualBoxControl(object):
         return bool(occurences)
 
 
+def with_started_vm(shutdown_vm_after=False, vm_name='', error_value=None):
+    def wrapper(func):
+        @wraps(func)
+        def wrapped_function(*args, **kwargs):
+            vm = VirtualBoxControl(vm_name)
+            if not vm.start_VM():
+                return error_value
+            results = func(*args, **kwargs)
+            if shutdown_vm_after:
+                vm.stop_VM()
+            return results
+        return wrapped_function
+    return wrapper
+
+
 class VMRunner(object):
     """
     Runs a project inside a existing Linux VM. The VM should run a relatively
@@ -240,9 +256,7 @@ class VMRunner(object):
         self.timeout = 10
         self.shutdown_vm_after = shutdown_vm_after
         # settings for connecting the VM via SSH
-        self.vm_name = 'Debian_Testing'
-        self.vm = VirtualBoxControl(self.vm_name)
-        self.host = '192.168.10.130'
+        self.host = '192.168.56.101'
         self.username = 'testrunner'
         self.password = '1234'
         self.remote_path = '/home/testrunner/runner/'
@@ -266,9 +280,8 @@ class VMRunner(object):
         print('[Remote] Removing %s%s' % ('    ' * level, remotepath))
         sftp.rmdir(remotepath)
 
+    @with_started_vm(vm_name='Testrunner', shutdown_vm_after=False, error_value=(-1, ''))
     def run(self, project):
-        if not self.vm.start_VM():
-            return -1, ''
         if not os.path.exists(os.path.join(project.tempdir, project.target)):
             raise FileNotFoundError('Error: Executable file has not been created!')
         copy_to_vm = [os.path.join(project.tempdir, project.target)]
@@ -317,8 +330,6 @@ class VMRunner(object):
             # delete all files in home directory
             self.rmtree(sftp, self.remote_path)
         client.close()
-        if self.shutdown_vm_after:
-            self.vm.stop_VM()
         return return_code, data
 
 
